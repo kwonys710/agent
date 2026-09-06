@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+data/*.db
+data/.tokens/
+credentials/
+client_secret*.json
+token.json
+
+*.egg-info/
+.pytest_cache/

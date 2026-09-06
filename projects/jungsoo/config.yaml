@@ -1,0 +1,19 @@
+# 프로젝트별 설정. credential/token은 여기에 절대 저장하지 않는다.
+project_id: jungsoo
+project_name: "중대범죄수사청 대표 홈페이지 구축"
+
+drive:
+  drive_type: my_drive        # my_drive | shared_drive
+  shared_drive_id: null       # drive_type: shared_drive일 때만 사용
+
+  # 실제 프로젝트 폴더의 Google Drive Folder ID로 교체할 것.
+  # 값을 채우지 않으면 환경변수 PM_JUNGSOO_ROOT_FOLDER_ID 로도 지정할 수 있다.
+  root_folder_id: CHANGE_ME
+
+  include_subfolders: true
+  excluded_folder_ids: []
+
+scope:
+  # 이 값을 올리면 Folder Registry의 scope 캐시가 무효화되어 재계산된다.
+  # (재계산은 scope 판정만 다시 하는 것이며, 파일 내용 재분석과는 무관하다)
+  config_version: 1
