@@ -33,6 +33,32 @@ class DriveClient(Protocol):
         ...
 
 
+def paginate_changes(fetch_page, page_token: str):
+    """changes.list의 페이지네이션 루프를 순수 함수로 분리한 것.
+
+    fetch_page(token) -> Drive API의 changes.list 응답과 동일한 shape의 dict
+    ({"changes": [...], "nextPageToken": ..., "newStartPageToken": ...})을 반환해야 한다.
+
+    이렇게 분리해 두면 실제 googleapiclient 서비스 객체 없이도(순수 함수 테스트로)
+    "여러 페이지를 전부 순회하는지", "중간 페이지의 token을 최종 checkpoint로
+    잘못 쓰지 않는지"를 검증할 수 있다.
+    """
+    changes: list = []
+    next_page_token = page_token
+    new_start_page_token = None
+
+    while True:
+        resp = fetch_page(next_page_token)
+        changes.extend(resp.get("changes", []))
+        if "newStartPageToken" in resp:
+            new_start_page_token = resp["newStartPageToken"]
+        next_page_token = resp.get("nextPageToken")
+        if not next_page_token:
+            break
+
+    return changes, new_start_page_token
+
+
 def raw_to_meta(raw: dict) -> DriveFileMeta:
     return DriveFileMeta(
         drive_file_id=raw["id"],
@@ -105,27 +131,19 @@ class GoogleDriveClient:
 
     def list_changes(self, page_token: str):
         service = self._get_service()
-        changes: list = []
-        next_page_token = page_token
-        new_start_page_token = None
 
-        while True:
-            resp = (
+        def fetch_page(token):
+            return (
                 service.changes()
                 .list(
-                    pageToken=next_page_token,
+                    pageToken=token,
                     fields=f"nextPageToken,newStartPageToken,changes(fileId,removed,file({METADATA_FIELDS}))",
                     pageSize=100,
                 )
                 .execute()
             )
-            changes.extend(resp.get("changes", []))
-            if "newStartPageToken" in resp:
-                new_start_page_token = resp["newStartPageToken"]
-            next_page_token = resp.get("nextPageToken")
-            if not next_page_token:
-                break
 
+        changes, new_start_page_token = paginate_changes(fetch_page, page_token)
         return changes, new_start_page_token, None
 
     def get_file_metadata(self, file_id: str) -> Optional[DriveFileMeta]:

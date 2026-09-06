@@ -5,14 +5,16 @@
 """
 from __future__ import annotations
 
-from engine.drive.client import raw_to_meta
+from engine.drive.client import paginate_changes, raw_to_meta
 
 
 class FakeDriveClient:
-    def __init__(self) -> None:
+    def __init__(self, page_size: int = 100) -> None:
         self._files: dict = {}
         self._change_log: list = []  # [(token:int, change_dict), ...]
         self._token_counter = 0
+        # 작게 설정하면 list_changes가 실제 Drive API처럼 여러 페이지로 나뉘어 반환된다.
+        self.page_size = page_size
 
     # ------------------------------------------------------------------
     # 테스트에서 Drive 상태를 조작하기 위한 헬퍼
@@ -77,7 +79,23 @@ class FakeDriveClient:
         ]
 
     def list_changes(self, page_token: str):
+        """실제 GoogleDriveClient.list_changes와 동일한 paginate_changes 루프를 사용해
+        여러 페이지로 나뉜 changes.list 응답을 흉내 낸다."""
         start = int(page_token)
-        changes = [change for token, change in self._change_log if token > start]
-        new_start_page_token = str(self._token_counter)
+        pending = [change for token, change in self._change_log if token > start]
+        page_size = self.page_size
+        final_token = str(self._token_counter)
+
+        def fetch_page(offset_token):
+            offset = int(offset_token)
+            page_items = pending[offset: offset + page_size]
+            next_offset = offset + page_size
+            resp: dict = {"changes": page_items}
+            if next_offset < len(pending):
+                resp["nextPageToken"] = str(next_offset)
+            else:
+                resp["newStartPageToken"] = final_token
+            return resp
+
+        changes, new_start_page_token = paginate_changes(fetch_page, "0")
         return changes, new_start_page_token, None

@@ -87,3 +87,34 @@ class ProjectScopeFilter:
         in_scope = self.resolve_folder_scope(parent_id) if parent_id else False
         self._cache(folder_id, parent_id, meta.name, in_scope)
         return in_scope
+
+    def set_scope(self, folder_id: str, parent_folder_id: Optional[str], name: str, in_scope: bool) -> None:
+        """캐시를 직접 기록한다 (새로 발견한 폴더를 등록할 때 사용)."""
+        self._cache(folder_id, parent_folder_id, name, in_scope)
+
+    def force_resolve_folder_scope(
+        self, folder_id: str, parent_folder_id: Optional[str], name: str
+    ) -> bool:
+        """이 폴더 자신의 캐시는 신뢰하지 않고, 주어진 parent_folder_id 기준으로 강제 재계산한다.
+
+        폴더 자신의 rename/move 이벤트를 처리할 때 사용한다 — 폴더 자신의 parent가
+        방금 바뀌었을 수 있으므로 자신의 옛 캐시를 그대로 반환하면 안 되기 때문이다.
+        (parent 쪽 scope는 여전히 캐시를 사용 — parent 자체가 바뀐 게 아니라면 재계산 불필요)
+        """
+        drive_cfg = self._config.drive
+
+        if folder_id in drive_cfg.excluded_folder_ids:
+            in_scope = False
+        elif folder_id == drive_cfg.root_folder_id:
+            in_scope = True
+        elif not drive_cfg.include_subfolders:
+            in_scope = False
+        elif parent_folder_id is None:
+            in_scope = False
+        elif parent_folder_id in drive_cfg.excluded_folder_ids:
+            in_scope = False
+        else:
+            in_scope = self.resolve_folder_scope(parent_folder_id)
+
+        self._cache(folder_id, parent_folder_id, name, in_scope)
+        return in_scope

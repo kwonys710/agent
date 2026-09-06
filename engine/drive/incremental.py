@@ -7,6 +7,8 @@
    실제 파일 다운로드나 Claude 호출은 이번 MVP 범위에 아예 존재하지 않는다.
 3. Checkpoint(page token)는 이번 실행의 모든 DB 반영이 성공한 뒤에만 전진한다.
    중간에 예외가 나면 트랜잭션 전체가 롤백되어, 다음 실행이 같은 구간을 다시 받는다.
+4. 폴더가 scope 경계를 넘나드는 이동은 별도 처리한다(engine.drive.subtree) —
+   내부→외부는 이미 알려진 하위만 갱신, 외부→내부는 새로 편입된 하위만 조회한다.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ from .client import DriveClient, raw_to_meta
 from .models import FileCategory
 from .registry import log_event, now, upsert_file
 from .scope import ProjectScopeFilter
+from .subtree import bring_subtree_into_scope, cascade_mark_out_of_scope
 from engine.state.database import transaction
 
 
@@ -32,6 +35,7 @@ def _empty_report() -> dict:
         "deleted": [],
         "out_of_scope": 0,
         "metadata_only": 0,
+        "content_change_unverified": [],
         "native_change_detected": [],
         "content_downloads": 0,
         "claude_api_calls": 0,
@@ -61,7 +65,7 @@ def run_incremental(conn, config, drive_client: DriveClient) -> dict:
             scope = ProjectScopeFilter(conn, config, drive_client)
 
             for change in changes:
-                _process_change(conn, config, scope, change, report)
+                _process_change(conn, config, drive_client, scope, change, report)
 
             conn.execute(
                 """
@@ -91,7 +95,7 @@ def run_incremental(conn, config, drive_client: DriveClient) -> dict:
         raise
 
 
-def _process_change(conn, config, scope: ProjectScopeFilter, change: dict, report: dict) -> None:
+def _process_change(conn, config, drive_client, scope: ProjectScopeFilter, change: dict, report: dict) -> None:
     drive_file_id = change.get("fileId")
     if not drive_file_id:
         return
@@ -124,11 +128,7 @@ def _process_change(conn, config, scope: ProjectScopeFilter, change: dict, repor
     meta = raw_to_meta(raw_file)
 
     if meta.category == FileCategory.FOLDER:
-        # 폴더 자체의 변경(이름/이동)은 scope 캐시 재확인만 수행한다.
-        # 주의: 이미 같은 scope_config_version으로 캐시된 폴더는 재계산되지 않으므로
-        # 폴더 자체의 rename/move가 Registry의 folder_name/parent에 즉시 반영되지 않을 수 있다
-        # (README/보고서에 명시한 알려진 제한사항).
-        scope.resolve_folder_scope(meta.drive_file_id)
+        _process_folder_change(conn, config, drive_client, scope, meta, report)
         return
 
     in_scope = scope.resolve_folder_scope(meta.parent_folder_id)
@@ -163,52 +163,54 @@ def _process_change(conn, config, scope: ProjectScopeFilter, change: dict, repor
     if existing["parent_folder_id"] != meta.parent_folder_id:
         reasons.append("moved")
 
-    content_changed = False
     if meta.category == FileCategory.BINARY:
-        content_changed = (existing["checksum"] or None) != (meta.md5_checksum or None)
+        if meta.md5_checksum is None:
+            # checksum을 제공받지 못한 경우: 이번 MVP는 다운로드해서 hash를 계산하지 않는다
+            # (의도적 제한 — Content Processing 단계의 몫). "확인된 무변경"과 뒤섞이지 않도록
+            # 명시적으로 별도 상태로만 기록한다.
+            if reasons:
+                _apply_rename_move(conn, config, existing, meta, reasons, report)
+                return
+            conn.execute(
+                """
+                UPDATE files
+                SET modified_time = ?, processing_status = 'content_change_unverified',
+                    last_seen_at = ?, updated_at = ?
+                WHERE project_id = ? AND drive_file_id = ?
+                """,
+                (meta.modified_time, now(), now(), config.project_id, drive_file_id),
+            )
+            log_event(conn, config, drive_file_id, "content_change_unverified", {"filename": meta.name})
+            report["content_change_unverified"].append(meta.name)
+            return
 
-    if meta.category == FileCategory.BINARY and content_changed:
-        new_version = existing["internal_content_version"] + 1
-        conn.execute(
-            """
-            UPDATE files
-            SET filename = ?, parent_folder_id = ?, size = ?, modified_time = ?,
-                checksum = ?, drive_version = ?, processing_status = 'modified',
-                internal_content_version = ?, in_project_scope = 1,
-                last_seen_at = ?, updated_at = ?
-            WHERE project_id = ? AND drive_file_id = ?
-            """,
-            (
-                meta.name, meta.parent_folder_id, meta.size, meta.modified_time,
-                meta.md5_checksum, meta.head_revision_id, new_version,
-                now(), now(), config.project_id, drive_file_id,
-            ),
-        )
-        log_event(
-            conn, config, drive_file_id, "modified",
-            {"reasons": reasons, "internal_content_version": new_version},
-        )
-        report["modified"].append(meta.name)
-        return
+        content_changed = (existing["checksum"] or None) != meta.md5_checksum
+        if content_changed:
+            new_version = existing["internal_content_version"] + 1
+            conn.execute(
+                """
+                UPDATE files
+                SET filename = ?, parent_folder_id = ?, size = ?, modified_time = ?,
+                    checksum = ?, drive_version = ?, processing_status = 'modified',
+                    internal_content_version = ?, in_project_scope = 1,
+                    last_seen_at = ?, updated_at = ?
+                WHERE project_id = ? AND drive_file_id = ?
+                """,
+                (
+                    meta.name, meta.parent_folder_id, meta.size, meta.modified_time,
+                    meta.md5_checksum, meta.head_revision_id, new_version,
+                    now(), now(), config.project_id, drive_file_id,
+                ),
+            )
+            log_event(
+                conn, config, drive_file_id, "modified",
+                {"reasons": reasons, "internal_content_version": new_version},
+            )
+            report["modified"].append(meta.name)
+            return
 
     if reasons:
-        conn.execute(
-            """
-            UPDATE files
-            SET filename = ?, parent_folder_id = ?, modified_time = ?,
-                in_project_scope = 1, last_seen_at = ?, updated_at = ?
-            WHERE project_id = ? AND drive_file_id = ?
-            """,
-            (meta.name, meta.parent_folder_id, meta.modified_time, now(), now(), config.project_id, drive_file_id),
-        )
-        if "renamed" in reasons:
-            log_event(conn, config, drive_file_id, "renamed",
-                       {"old_name": existing["filename"], "new_name": meta.name})
-            report["renamed"].append(meta.name)
-        if "moved" in reasons:
-            log_event(conn, config, drive_file_id, "moved",
-                       {"old_parent": existing["parent_folder_id"], "new_parent": meta.parent_folder_id})
-            report["moved"].append(meta.name)
+        _apply_rename_move(conn, config, existing, meta, reasons, report)
         return
 
     if meta.category == FileCategory.GOOGLE_NATIVE and existing["modified_time"] != meta.modified_time:
@@ -228,3 +230,72 @@ def _process_change(conn, config, scope: ProjectScopeFilter, change: dict, repor
     )
     log_event(conn, config, drive_file_id, "metadata_only", {})
     report["metadata_only"] += 1
+
+
+def _apply_rename_move(conn, config, existing, meta, reasons: list, report: dict) -> None:
+    conn.execute(
+        """
+        UPDATE files
+        SET filename = ?, parent_folder_id = ?, modified_time = ?,
+            in_project_scope = 1, last_seen_at = ?, updated_at = ?
+        WHERE project_id = ? AND drive_file_id = ?
+        """,
+        (meta.name, meta.parent_folder_id, meta.modified_time, now(), now(), config.project_id, meta.drive_file_id),
+    )
+    if "renamed" in reasons:
+        log_event(conn, config, meta.drive_file_id, "renamed",
+                   {"old_name": existing["filename"], "new_name": meta.name})
+        report["renamed"].append(meta.name)
+    if "moved" in reasons:
+        log_event(conn, config, meta.drive_file_id, "moved",
+                   {"old_parent": existing["parent_folder_id"], "new_parent": meta.parent_folder_id})
+        report["moved"].append(meta.name)
+
+
+def _process_folder_change(conn, config, drive_client, scope: ProjectScopeFilter, meta, report: dict) -> None:
+    """폴더 자신의 변경 이벤트 처리.
+
+    폴더 자신의 scope 캐시는 신뢰하지 않고 강제로 재계산한다(force_resolve_folder_scope) —
+    자신의 parent가 방금 바뀌었을 수 있기 때문이다. rename/이동은 하위 파일 내용을
+    재분석하지 않으며, scope 경계를 넘는 이동만 subtree 갱신을 유발한다(engine.drive.subtree).
+    """
+    existing = conn.execute(
+        "SELECT * FROM folders WHERE project_id = ? AND folder_id = ?",
+        (config.project_id, meta.drive_file_id),
+    ).fetchone()
+
+    new_scope = scope.force_resolve_folder_scope(meta.drive_file_id, meta.parent_folder_id, meta.name)
+
+    if existing is None:
+        if new_scope:
+            log_event(conn, config, meta.drive_file_id, "new", {"filename": meta.name, "kind": "folder"})
+            bring_subtree_into_scope(conn, config, drive_client, scope, meta.drive_file_id, report)
+        return
+
+    old_scope = bool(existing["in_project_scope"])
+    old_name = existing["folder_name"]
+    old_parent = existing["parent_folder_id"]
+
+    if old_scope and new_scope:
+        if old_name != meta.name:
+            log_event(conn, config, meta.drive_file_id, "renamed",
+                       {"old_name": old_name, "new_name": meta.name, "kind": "folder"})
+            report["renamed"].append(meta.name)
+        if old_parent != meta.parent_folder_id:
+            log_event(conn, config, meta.drive_file_id, "moved",
+                       {"old_parent": old_parent, "new_parent": meta.parent_folder_id, "kind": "folder"})
+            report["moved"].append(meta.name)
+        return
+
+    if old_scope and not new_scope:
+        log_event(conn, config, meta.drive_file_id, "out_of_scope", {"filename": meta.name, "kind": "folder"})
+        cascade_mark_out_of_scope(conn, config, meta.drive_file_id, report)
+        return
+
+    if not old_scope and new_scope:
+        log_event(conn, config, meta.drive_file_id, "new",
+                   {"filename": meta.name, "kind": "folder", "reason": "moved_into_scope"})
+        bring_subtree_into_scope(conn, config, drive_client, scope, meta.drive_file_id, report)
+        return
+
+    # not old_scope and not new_scope: 관심 밖 폴더 — 아무 것도 하지 않음

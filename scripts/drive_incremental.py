@@ -72,6 +72,7 @@ def main() -> None:
     print(f"\nDrive Changes events received: {report['changes_received']}")
     print(f"Project scope matched: {report['scope_matched']}")
     print(f"Metadata-only (무시): {report['metadata_only']}")
+    print(f"Content change unverified (checksum 없음, 다운로드 안 함): {len(report['content_change_unverified'])}")
     print(f"Content files downloaded: {report['content_downloads']}")
     print(f"Claude API calls: {report['claude_api_calls']}")
 
