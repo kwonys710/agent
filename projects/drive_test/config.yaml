@@ -1,0 +1,18 @@
+# 실제 Google Drive API 연동 검증 전용 config. jungsoo(실 프로젝트)와는 완전히 분리되어 있다.
+# 반드시 별도의 테스트 전용 Drive 폴더(예: PM_AUTOMATION_TEST)만 대상으로 한다.
+project_id: drive_test
+project_name: "PM Automation Drive Test"
+
+drive:
+  drive_type: my_drive
+  shared_drive_id: null
+
+  # PM_AUTOMATION_TEST(테스트 전용 폴더)의 실제 Google Drive Folder ID로 교체할 것.
+  # 값을 채우지 않으면 환경변수 PM_DRIVE_TEST_ROOT_FOLDER_ID 로도 지정할 수 있다.
+  root_folder_id: CHANGE_ME
+
+  include_subfolders: true
+  excluded_folder_ids: []
+
+scope:
+  config_version: 1
