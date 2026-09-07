@@ -182,6 +182,36 @@ def test_deleted_file_marks_registry_without_removing_row(conn, config):
     assert row["is_deleted"] == 1
 
 
+# 휴지통 복원 — is_deleted/processing_status가 'deleted'로 계속 남으면 안 됨 --------------------
+# (scope 재진입 버그와 같은 계열: 역방향 전이 시 상태 플래그가 리셋되지 않는 문제)
+
+def test_restored_from_trash_resets_is_deleted_and_status(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)  # F1
+    fake.trash_file("F1")
+    del_report = run_incremental(conn, config, fake)
+    assert del_report["deleted"] == ["0907회의록.pdf"]
+
+    trashed_row = conn.execute(
+        "SELECT is_deleted, processing_status FROM files WHERE drive_file_id = 'F1'"
+    ).fetchone()
+    assert trashed_row["is_deleted"] == 1
+    assert trashed_row["processing_status"] == "deleted"
+
+    fake.untrash_file("F1")
+    restore_report = run_incremental(conn, config, fake)
+
+    rows = conn.execute("SELECT * FROM files WHERE drive_file_id = 'F1'").fetchall()
+    assert len(rows) == 1, "중복 registry row가 생성되면 안 된다"
+
+    restored = rows[0]
+    assert restored["is_deleted"] == 0, "휴지통에서 복원되면 is_deleted가 다시 0이 되어야 한다"
+    assert restored["processing_status"] != "deleted"
+    assert restored["internal_content_version"] == 1  # 내용 변경 없었으므로 버전 증가 없음
+
+    assert restore_report["content_downloads"] == 0
+    assert restore_report["claude_api_calls"] == 0
+
+
 # Google Workspace Native 파일 — 변경은 기록하되 내용은 조회하지 않음 -----------------------
 
 def test_native_file_change_detected_without_content_check(conn, config):

@@ -59,6 +59,11 @@ class FakeDriveClient:
         raw["trashed"] = True
         self._record_change(file_id, raw)
 
+    def untrash_file(self, file_id):
+        raw = self._files[file_id]
+        raw["trashed"] = False
+        self._record_change(file_id, raw)
+
     # ------------------------------------------------------------------
     # DriveClient 인터페이스 구현 (content download 메서드는 존재하지 않음)
     # ------------------------------------------------------------------

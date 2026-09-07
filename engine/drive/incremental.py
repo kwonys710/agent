@@ -161,6 +161,22 @@ def _process_change(conn, config, drive_client, scope: ProjectScopeFilter, chang
         report["new"].append(meta.name)
         return
 
+    if existing["is_deleted"]:
+        # 휴지통에서 복원된 경우: scope 재진입 버그와 동일한 계열의 문제 —
+        # is_deleted/processing_status가 'deleted'로 계속 남아있으면 안 된다.
+        # (이후 rename/modify 판정은 아래 로직이 그대로 이어서 처리한다)
+        conn.execute(
+            """
+            UPDATE files
+            SET is_deleted = 0,
+                processing_status = CASE WHEN processing_status = 'deleted'
+                                          THEN 'registered' ELSE processing_status END,
+                last_seen_at = ?, updated_at = ?
+            WHERE project_id = ? AND drive_file_id = ?
+            """,
+            (now(), now(), config.project_id, drive_file_id),
+        )
+
     reasons = []
     if existing["filename"] != meta.name:
         reasons.append("renamed")
