@@ -110,6 +110,65 @@ def test_move_out_of_project_scope_keeps_registry_row(conn, config):
     assert row["in_project_scope"] == 0
 
 
+# 실제 Drive 통합 테스트에서 발견된 re-entry 상태 불일치 재현 테스트 -------------------------------
+# scope 밖 → 안으로 같은 drive_file_id가 돌아왔을 때 in_project_scope는 복구되지만
+# processing_status가 'out_of_scope'로 남아있던 버그의 regression test.
+
+def test_file_scope_reentry_restores_processing_status(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)  # F1: parent=ROOT, checksum="h1"
+
+    # 1) scope 밖으로 이동
+    fake.modify_file("F1", parents=["OUTSIDE"])
+    out_report = run_incremental(conn, config, fake)
+    assert out_report["out_of_scope"] == 1
+
+    left = conn.execute(
+        "SELECT in_project_scope, processing_status, is_deleted FROM files WHERE drive_file_id = 'F1'"
+    ).fetchone()
+    assert left["in_project_scope"] == 0
+    assert left["processing_status"] == "out_of_scope"
+    assert left["is_deleted"] == 0
+
+    # 2) 같은 drive_file_id가 다시 프로젝트(ROOT)로 이동 — 내용은 그대로(checksum 불변)
+    fake.modify_file("F1", parents=["ROOT"])
+    back_report = run_incremental(conn, config, fake)
+
+    rows = conn.execute("SELECT * FROM files WHERE drive_file_id = 'F1'").fetchall()
+    assert len(rows) == 1, "중복 registry row가 생성되면 안 된다"
+
+    restored = rows[0]
+    assert restored["in_project_scope"] == 1
+    assert restored["processing_status"] != "out_of_scope", (
+        "scope 재진입 후에도 processing_status가 'out_of_scope'로 남아있다 (재현된 버그)"
+    )
+    assert restored["processing_status"] == "registered"
+    assert restored["is_deleted"] == 0
+    assert restored["internal_content_version"] == 1  # 내용 변경이 없었으므로 버전 증가 없음
+
+    assert back_report["content_downloads"] == 0
+    assert back_report["claude_api_calls"] == 0
+
+
+def test_file_scope_reentry_to_same_original_folder_is_detected(conn, config):
+    """parent_folder_id가 scope 이탈 시점에 갱신되지 않으면, 원래 있던 바로 그 폴더로
+    되돌아왔을 때 reasons(diff)가 비어 재진입 자체를 놓칠 수 있다 — 이를 방지하는 회귀 테스트."""
+    fake = _bootstrap_with_one_file(conn, config)  # F1: parent=ROOT
+
+    fake.modify_file("F1", parents=["OUTSIDE"])
+    run_incremental(conn, config, fake)
+
+    # 나갔던 것과 동일한 원래 폴더(ROOT)로 정확히 되돌아옴
+    fake.modify_file("F1", parents=["ROOT"])
+    report = run_incremental(conn, config, fake)
+
+    row = conn.execute(
+        "SELECT in_project_scope, processing_status FROM files WHERE drive_file_id = 'F1'"
+    ).fetchone()
+    assert row["in_project_scope"] == 1, "원래 폴더로 되돌아왔는데도 out_of_scope에 갇히면 안 된다"
+    assert row["processing_status"] == "registered"
+    assert report["scope_matched"] == 1
+
+
 # 삭제 --------------------------------------------------------------------------------
 
 def test_deleted_file_marks_registry_without_removing_row(conn, config):

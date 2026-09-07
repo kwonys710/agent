@@ -135,13 +135,17 @@ def _process_change(conn, config, drive_client, scope: ProjectScopeFilter, chang
 
     if not in_scope:
         if existing is not None:
+            # parent_folder_id도 현재 값으로 갱신해야 한다 — 갱신하지 않으면, 나중에 같은 파일이
+            # (심지어 원래 있던 바로 그 폴더로) 다시 scope 안으로 돌아왔을 때 저장된 parent가
+            # 여전히 예전 in-scope 폴더를 가리키고 있어 diff(reasons)가 비어 재진입 감지 자체를
+            # 놓치는 버그가 발생한다 (실제 Drive 통합 테스트에서 발견).
             conn.execute(
                 """
                 UPDATE files SET in_project_scope = 0, processing_status = 'out_of_scope',
-                                 last_seen_at = ?, updated_at = ?
+                                 parent_folder_id = ?, last_seen_at = ?, updated_at = ?
                 WHERE project_id = ? AND drive_file_id = ?
                 """,
-                (now(), now(), config.project_id, drive_file_id),
+                (meta.parent_folder_id, now(), now(), config.project_id, drive_file_id),
             )
         else:
             upsert_file(conn, config, meta, in_scope=False, status="out_of_scope")
@@ -233,11 +237,17 @@ def _process_change(conn, config, drive_client, scope: ProjectScopeFilter, chang
 
 
 def _apply_rename_move(conn, config, existing, meta, reasons: list, report: dict) -> None:
+    # scope 밖에 있다가 돌아온 파일은 lifecycle 상태를 명시적으로 'registered'로 복구한다
+    # (engine.drive.subtree.bring_subtree_into_scope가 폴더 재진입 시 이미 쓰는 것과 동일한 규칙).
+    # 그 외의 평범한 scope 내부 rename/move는 기존 processing_status(modified 등)를 그대로 둔다.
     conn.execute(
         """
         UPDATE files
         SET filename = ?, parent_folder_id = ?, modified_time = ?,
-            in_project_scope = 1, last_seen_at = ?, updated_at = ?
+            in_project_scope = 1,
+            processing_status = CASE WHEN processing_status = 'out_of_scope'
+                                      THEN 'registered' ELSE processing_status END,
+            last_seen_at = ?, updated_at = ?
         WHERE project_id = ? AND drive_file_id = ?
         """,
         (meta.name, meta.parent_folder_id, meta.modified_time, now(), now(), config.project_id, meta.drive_file_id),
