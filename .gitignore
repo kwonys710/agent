@@ -6,6 +6,7 @@ venv/
 
 data/*.db
 data/.tokens/
+data/backups/
 credentials/
 client_secret*.json
 token.json
