@@ -22,9 +22,22 @@ CATEGORY_DUE_TODAY = "DUE_TODAY"
 CATEGORY_CHANGED = "CHANGED"
 CATEGORY_DUE_SOON = "DUE_SOON"
 CATEGORY_START_TODAY = "START_TODAY"
+CATEGORY_FOLLOW_UP = "FOLLOW_UP"
 CATEGORY_NEEDS_CONFIRMATION = "NEEDS_CONFIRMATION"
 
-# primary category 결정용 우선순위. FOLLOW_UP 은 Commit 5 에서 추가 예정.
+# FOLLOW_UP reason 은 이전 persist snapshot 에 의존하므로 rule engine 밖(candidates.merge_follow_up)에서
+# 붙는다. 여기서는 priority 순서와 reason 문구만 정의한다.
+# 기준일은 "정확한 전일"이 아니라 "오늘보다 이전인 가장 최근 Daily To-Do 실행일"이다
+# (주말/공휴일/스케줄러 미실행을 고려).
+FOLLOW_UP_REASON = "이전 Daily To-Do에서 미해결 상태로 남아 있음."
+
+
+def follow_up_reason(previous_date=None) -> str:
+    if previous_date:
+        return f"{previous_date} Daily To-Do에서 미해결 상태로 남아 있음."
+    return FOLLOW_UP_REASON
+
+# primary category 결정용 우선순위.
 CATEGORY_PRIORITY = (
     CATEGORY_OVERDUE,
     CATEGORY_BLOCKED,
@@ -32,6 +45,7 @@ CATEGORY_PRIORITY = (
     CATEGORY_CHANGED,
     CATEGORY_DUE_SOON,
     CATEGORY_START_TODAY,
+    CATEGORY_FOLLOW_UP,
     CATEGORY_NEEDS_CONFIRMATION,
 )
 

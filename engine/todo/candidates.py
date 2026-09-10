@@ -12,10 +12,13 @@ from typing import Mapping, Optional
 
 from engine.wbs.normalize import NormalizedStatus
 from .rules import (
+    CATEGORY_FOLLOW_UP,
     CATEGORY_NEEDS_CONFIRMATION,
+    RuleHit,
     category_priority_index,
     confirmation_hit,
     evaluate_task,
+    follow_up_reason,
     has_confirmation_issue,
     is_done,
 )
@@ -209,3 +212,55 @@ def build_candidates(
         needs_confirmation_count=needs_confirmation_count,
         category_counts=category_counts,
     )
+
+
+def _merge_categories(existing_primary: str, existing_also: tuple, extra: str) -> tuple:
+    seen = [existing_primary, *existing_also]
+    if extra not in seen:
+        seen.append(extra)
+    ordered = sorted(dict.fromkeys(seen), key=category_priority_index)
+    return ordered[0], tuple(ordered[1:])
+
+
+def merge_follow_up(candidates, previous_unresolved, states_by_id, config, *, previous_date=None):
+    """FOLLOW_UP = 이전 Daily To-Do 실행일에 있었으나 아직 해결되지 않은 업무.
+
+    - previous_unresolved: 오늘보다 이전인 가장 최근 실행일의 daily_todo_item 중 resolved == 0
+      (기준일 선택은 persist.get_previous_unresolved_snapshot 책임 — 여기서는 internal_task_id 만 사용).
+    - 현재 WBS state 와 다시 대조: 현재 active + not done + state 존재 인 것만 FOLLOW_UP 후보.
+    - 오늘 이미 다른 category 후보인 task 는 FOLLOW_UP 을 also/reason 에 merge (중복 candidate 금지).
+    - 오늘 다른 category 가 전혀 없는 task 는 FOLLOW_UP 단독 candidate 로 추가.
+
+    returns (merged_candidates: tuple, follow_up_ids: frozenset)
+    """
+    reason_text = follow_up_reason(previous_date)
+
+    follow_up_ids = set()
+    for item in previous_unresolved or []:
+        internal_task_id = item["internal_task_id"] if isinstance(item, dict) else item
+        state = states_by_id.get(internal_task_id)
+        if state is None or not state.is_active:
+            continue
+        if is_done(state, config):
+            continue
+        follow_up_ids.add(internal_task_id)
+
+    existing_ids = {c.internal_task_id for c in candidates}
+    merged: list = []
+
+    for candidate in candidates:
+        if candidate.internal_task_id in follow_up_ids:
+            primary, also = _merge_categories(candidate.category, candidate.also_categories, CATEGORY_FOLLOW_UP)
+            reason = (candidate.reason + " " + reason_text).strip()
+            merged.append(dataclasses.replace(
+                candidate, category=primary, also_categories=also, reason=reason,
+            ))
+        else:
+            merged.append(candidate)
+
+    for internal_task_id in follow_up_ids - existing_ids:
+        state = states_by_id[internal_task_id]
+        hit = RuleHit(CATEGORY_FOLLOW_UP, reason_text)
+        merged.append(_build_candidate(state, [hit], None))
+
+    return tuple(sort_candidates(merged)), frozenset(follow_up_ids)
