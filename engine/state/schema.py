@@ -101,6 +101,8 @@ SCHEMA_STATEMENTS = [
         row_key TEXT NOT NULL,
 
         task_name TEXT,
+        project TEXT,
+        phase TEXT,
         owner TEXT,
         start_date TEXT,
         end_date TEXT,
@@ -110,6 +112,7 @@ SCHEMA_STATEMENTS = [
         priority TEXT,
         dependency TEXT,
         notes TEXT,
+        source_updated_at TEXT,
         parse_errors TEXT,
 
         row_hash TEXT NOT NULL,
