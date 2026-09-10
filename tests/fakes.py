@@ -106,3 +106,38 @@ class FakeDriveClient:
 
         changes, new_start_page_token = paginate_changes(fetch_page, "0")
         return changes, new_start_page_token, None
+
+
+class FakeSheetsClient:
+    """테스트 전용 가짜 Sheets 클라이언트.
+
+    실제 Google API/네트워크/파일시스템 접근이 없다. 메모리 상의 2D 값과
+    modifiedTime 문자열만 흉내 낸다. 호출 횟수 카운터를 노출해서
+    "modifiedTime 동일 → get_values 호출 0" 같은 증분 정책을 검증할 수 있게 한다.
+    """
+
+    def __init__(self) -> None:
+        self._values: list = []
+        self._modified_time = "1970-01-01T00:00:00.000Z"
+        self.get_modified_time_calls = 0
+        self.get_values_calls = 0
+        self.last_get_values_args = None
+        self.last_get_modified_time_args = None
+
+    # 테스트에서 시트 상태를 조작하기 위한 헬퍼
+    def set_values(self, rows) -> None:
+        self._values = [list(row) for row in rows]
+
+    def set_modified_time(self, value: str) -> None:
+        self._modified_time = value
+
+    # SheetsClient 인터페이스 구현 (content download 메서드는 존재하지 않음)
+    def get_modified_time(self, spreadsheet_id: str) -> str:
+        self.get_modified_time_calls += 1
+        self.last_get_modified_time_args = (spreadsheet_id,)
+        return self._modified_time
+
+    def get_values(self, spreadsheet_id: str, sheet_name: str) -> list:
+        self.get_values_calls += 1
+        self.last_get_values_args = (spreadsheet_id, sheet_name)
+        return [list(row) for row in self._values]
