@@ -65,6 +65,7 @@ def main() -> None:
     _print_list("Modified", report["modified"])
     _print_list("Renamed/Moved", report["renamed"] + report["moved"])
     _print_list("Deleted", report["deleted"])
+    _print_list("Restored", report["restored"])
 
     print(f"\nOut of Scope:\n- {report['out_of_scope']}건")
     print(f"\nIgnored external (미등록 프로젝트 외부 파일 — Registry/Event 미생성):\n- {report['ignored_external']}건")
