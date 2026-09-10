@@ -67,6 +67,7 @@ def main() -> None:
     _print_list("Deleted", report["deleted"])
 
     print(f"\nOut of Scope:\n- {report['out_of_scope']}건")
+    print(f"\nIgnored external (미등록 프로젝트 외부 파일 — Registry/Event 미생성):\n- {report['ignored_external']}건")
     print("\nUnchanged files scanned:\n- 0")
 
     print(f"\nDrive Changes events received: {report['changes_received']}")

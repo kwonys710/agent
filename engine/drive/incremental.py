@@ -33,7 +33,9 @@ def _empty_report() -> dict:
         "renamed": [],
         "moved": [],
         "deleted": [],
+        "restored": [],
         "out_of_scope": 0,
+        "ignored_external": 0,
         "metadata_only": 0,
         "content_change_unverified": [],
         "native_change_detected": [],
@@ -110,9 +112,13 @@ def _process_change(conn, config, drive_client, scope: ProjectScopeFilter, chang
 
     if removed:
         if existing is not None:
+            # 삭제/휴지통 이동: active 대상에서 즉시 제외한다(in_project_scope = 0).
+            # drive_file_id / internal_content_version / checksum / registry row 자체는 보존한다 —
+            # 복원 시 같은 row를 되살리고, 삭제만으로는 내용 재분석(version bump)을 하지 않는다.
             conn.execute(
                 """
                 UPDATE files SET is_deleted = 1, processing_status = 'deleted',
+                                 in_project_scope = 0,
                                  last_seen_at = ?, updated_at = ?
                 WHERE project_id = ? AND drive_file_id = ?
                 """,
@@ -131,10 +137,18 @@ def _process_change(conn, config, drive_client, scope: ProjectScopeFilter, chang
         _process_folder_change(conn, config, drive_client, scope, meta, report)
         return
 
+    # 휴지통에서 복원된 기존 파일은 일반 metadata/rename/move/modified 판정보다 먼저
+    # 명시적인 restore 상태 전이로 처리한다 (is_deleted = 1 → 0).
+    if existing is not None and existing["is_deleted"]:
+        _process_restore(conn, config, scope, existing, meta, report)
+        return
+
     in_scope = scope.resolve_folder_scope(meta.parent_folder_id)
 
     if not in_scope:
         if existing is not None:
+            # Case A: 기존에 프로젝트가 관리하던 파일이 scope 밖(또는 excluded 폴더)으로 이동.
+            # registry row 자체는 보존하고 out_of_scope 상태 전이 + 이벤트만 기록한다.
             # parent_folder_id도 현재 값으로 갱신해야 한다 — 갱신하지 않으면, 나중에 같은 파일이
             # (심지어 원래 있던 바로 그 폴더로) 다시 scope 안으로 돌아왔을 때 저장된 parent가
             # 여전히 예전 in-scope 폴더를 가리키고 있어 diff(reasons)가 비어 재진입 감지 자체를
@@ -147,10 +161,14 @@ def _process_change(conn, config, drive_client, scope: ProjectScopeFilter, chang
                 """,
                 (meta.parent_folder_id, now(), now(), config.project_id, drive_file_id),
             )
+            log_event(conn, config, drive_file_id, "out_of_scope", {"filename": meta.name})
+            report["out_of_scope"] += 1
         else:
-            upsert_file(conn, config, meta, in_scope=False, status="out_of_scope")
-        log_event(conn, config, drive_file_id, "out_of_scope", {"filename": meta.name})
-        report["out_of_scope"] += 1
+            # Case B: 프로젝트가 한 번도 관리한 적 없는 외부 Drive 파일. Drive Changes API는
+            # 계정 전체 변경을 반환하므로, 이런 파일을 매 실행마다 registry/processing_events에
+            # 물질화하면 안 된다 — registry row도, 이벤트도 만들지 않고 완전히 무시한다.
+            # (개별 파일명은 저장하지 않고 카운트만 관측한다.)
+            report["ignored_external"] += 1
         return
 
     report["scope_matched"] += 1
@@ -160,22 +178,6 @@ def _process_change(conn, config, drive_client, scope: ProjectScopeFilter, chang
         log_event(conn, config, drive_file_id, "new", {"filename": meta.name})
         report["new"].append(meta.name)
         return
-
-    if existing["is_deleted"]:
-        # 휴지통에서 복원된 경우: scope 재진입 버그와 동일한 계열의 문제 —
-        # is_deleted/processing_status가 'deleted'로 계속 남아있으면 안 된다.
-        # (이후 rename/modify 판정은 아래 로직이 그대로 이어서 처리한다)
-        conn.execute(
-            """
-            UPDATE files
-            SET is_deleted = 0,
-                processing_status = CASE WHEN processing_status = 'deleted'
-                                          THEN 'registered' ELSE processing_status END,
-                last_seen_at = ?, updated_at = ?
-            WHERE project_id = ? AND drive_file_id = ?
-            """,
-            (now(), now(), config.project_id, drive_file_id),
-        )
 
     reasons = []
     if existing["filename"] != meta.name:
@@ -250,6 +252,53 @@ def _process_change(conn, config, drive_client, scope: ProjectScopeFilter, chang
     )
     log_event(conn, config, drive_file_id, "metadata_only", {})
     report["metadata_only"] += 1
+
+
+def _process_restore(conn, config, scope: ProjectScopeFilter, existing, meta, report: dict) -> None:
+    """휴지통에서 복원된 기존 파일(is_deleted = 1)의 상태 전이.
+
+    삭제 시 in_project_scope는 0으로 내려가 있으므로, 복원 시점의 실제 parent_folder_id를
+    기준으로 현재 scope를 다시 판정해 registry를 정상화한다. 같은 registry row를 되살리며
+    새 row를 만들지 않는다.
+
+    단순 복원은 내용 재분석을 의미하지 않는다 — internal_content_version / checksum은 여기서
+    건드리지 않는다(휴지통에 있는 동안 내용이 바뀐 경우의 처리 한계는 Remaining Risk로 문서화).
+    filename / parent_folder_id / modified_time만 현재 Drive metadata 기준으로 맞춘다.
+    """
+    in_scope = scope.resolve_folder_scope(meta.parent_folder_id)
+
+    if in_scope:
+        conn.execute(
+            """
+            UPDATE files
+            SET is_deleted = 0, in_project_scope = 1, processing_status = 'registered',
+                filename = ?, parent_folder_id = ?, modified_time = ?,
+                last_seen_at = ?, updated_at = ?
+            WHERE project_id = ? AND drive_file_id = ?
+            """,
+            (meta.name, meta.parent_folder_id, meta.modified_time, now(), now(),
+             config.project_id, meta.drive_file_id),
+        )
+        report["scope_matched"] += 1
+    else:
+        conn.execute(
+            """
+            UPDATE files
+            SET is_deleted = 0, in_project_scope = 0, processing_status = 'out_of_scope',
+                filename = ?, parent_folder_id = ?, modified_time = ?,
+                last_seen_at = ?, updated_at = ?
+            WHERE project_id = ? AND drive_file_id = ?
+            """,
+            (meta.name, meta.parent_folder_id, meta.modified_time, now(), now(),
+             config.project_id, meta.drive_file_id),
+        )
+        report["out_of_scope"] += 1
+
+    log_event(
+        conn, config, meta.drive_file_id, "restored",
+        {"filename": meta.name, "in_scope": bool(in_scope)},
+    )
+    report["restored"].append(meta.name)
 
 
 def _apply_rename_move(conn, config, existing, meta, reasons: list, report: dict) -> None:

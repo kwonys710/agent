@@ -182,34 +182,114 @@ def test_deleted_file_marks_registry_without_removing_row(conn, config):
     assert row["is_deleted"] == 1
 
 
-# 휴지통 복원 — is_deleted/processing_status가 'deleted'로 계속 남으면 안 됨 --------------------
-# (scope 재진입 버그와 같은 계열: 역방향 전이 시 상태 플래그가 리셋되지 않는 문제)
+# 삭제 상태 전이(Fix A) — scope 안 파일 삭제 시 in_project_scope도 0으로 내려간다 -----------------
 
-def test_restored_from_trash_resets_is_deleted_and_status(conn, config):
-    fake = _bootstrap_with_one_file(conn, config)  # F1
-    fake.trash_file("F1")
-    del_report = run_incremental(conn, config, fake)
-    assert del_report["deleted"] == ["0907회의록.pdf"]
+def test_trash_transitions_scope_out_and_keeps_registry_row(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)  # F1: parent=ROOT, checksum="h1", scope=1
 
-    trashed_row = conn.execute(
-        "SELECT is_deleted, processing_status FROM files WHERE drive_file_id = 'F1'"
+    before = conn.execute(
+        "SELECT internal_file_id, drive_file_id, internal_content_version, checksum, "
+        "in_project_scope, is_deleted, processing_status FROM files WHERE drive_file_id = 'F1'"
     ).fetchone()
-    assert trashed_row["is_deleted"] == 1
-    assert trashed_row["processing_status"] == "deleted"
+    assert before["in_project_scope"] == 1
+    assert before["is_deleted"] == 0
 
-    fake.untrash_file("F1")
-    restore_report = run_incremental(conn, config, fake)
+    fake.trash_file("F1")
+    report = run_incremental(conn, config, fake)
+
+    assert report["deleted"] == ["0907회의록.pdf"]
+    assert report["content_downloads"] == 0
+    assert report["claude_api_calls"] == 0
 
     rows = conn.execute("SELECT * FROM files WHERE drive_file_id = 'F1'").fetchall()
-    assert len(rows) == 1, "중복 registry row가 생성되면 안 된다"
+    assert len(rows) == 1, "삭제로 registry row가 사라지거나 중복되면 안 된다"
+    after = rows[0]
+    assert after["processing_status"] == "deleted"
+    assert after["is_deleted"] == 1
+    assert after["in_project_scope"] == 0
+    assert after["drive_file_id"] == "F1"
+    assert after["internal_file_id"] == before["internal_file_id"]
+    assert after["internal_content_version"] == before["internal_content_version"]  # 삭제만으로 버전 증가 금지
+    assert after["checksum"] == before["checksum"]
 
+    events = conn.execute(
+        "SELECT event_type FROM processing_events WHERE drive_file_id = 'F1' ORDER BY event_id"
+    ).fetchall()
+    assert [e["event_type"] for e in events] == ["new", "deleted"]
+
+
+# 휴지통 복원(Fix B) — 같은 프로젝트 폴더로 복원 -------------------------------------------------
+
+def test_restore_into_same_project_folder_transitions_back_to_registered(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)  # F1: parent=ROOT, checksum="h1"
+
+    fake.trash_file("F1")
+    run_incremental(conn, config, fake)
+
+    deleted = conn.execute(
+        "SELECT internal_file_id, internal_content_version FROM files WHERE drive_file_id = 'F1'"
+    ).fetchone()
+
+    fake.restore_file("F1")  # 같은 ROOT 폴더로, 내용 변경 없이 복원
+    report = run_incremental(conn, config, fake)
+
+    assert report["restored"] == ["0907회의록.pdf"]
+    assert report["content_downloads"] == 0
+    assert report["claude_api_calls"] == 0
+
+    rows = conn.execute("SELECT * FROM files WHERE drive_file_id = 'F1'").fetchall()
+    assert len(rows) == 1, "복원 시 registry row를 새로 만들면 안 된다"
     restored = rows[0]
-    assert restored["is_deleted"] == 0, "휴지통에서 복원되면 is_deleted가 다시 0이 되어야 한다"
-    assert restored["processing_status"] != "deleted"
-    assert restored["internal_content_version"] == 1  # 내용 변경 없었으므로 버전 증가 없음
+    assert restored["is_deleted"] == 0
+    assert restored["in_project_scope"] == 1
+    assert restored["processing_status"] == "registered"
+    assert restored["drive_file_id"] == "F1"
+    assert restored["internal_file_id"] == deleted["internal_file_id"]  # 동일 row
+    assert restored["internal_content_version"] == deleted["internal_content_version"]  # 단순 복원은 버전 불변
+    assert restored["parent_folder_id"] == "ROOT"
 
-    assert restore_report["content_downloads"] == 0
-    assert restore_report["claude_api_calls"] == 0
+    events = conn.execute(
+        "SELECT event_type, details FROM processing_events WHERE drive_file_id = 'F1' ORDER BY event_id"
+    ).fetchall()
+    assert [e["event_type"] for e in events] == ["new", "deleted", "restored"]
+    import json
+    restored_details = json.loads(events[-1]["details"])
+    assert restored_details["in_scope"] is True
+    assert restored_details["filename"] == "0907회의록.pdf"
+
+
+# 휴지통 복원(Fix B) — 프로젝트 scope 밖으로 복원 ---------------------------------------------
+
+def test_restore_outside_project_scope_transitions_to_out_of_scope(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)  # F1: parent=ROOT
+
+    fake.trash_file("F1")
+    run_incremental(conn, config, fake)
+
+    deleted = conn.execute(
+        "SELECT internal_file_id, internal_content_version FROM files WHERE drive_file_id = 'F1'"
+    ).fetchone()
+
+    fake.restore_file("F1", parents=["OUTSIDE"])  # scope 밖으로 복원
+    report = run_incremental(conn, config, fake)
+
+    assert report["restored"] == ["0907회의록.pdf"]
+
+    rows = conn.execute("SELECT * FROM files WHERE drive_file_id = 'F1'").fetchall()
+    assert len(rows) == 1, "중복 registry row가 생기면 안 된다"
+    restored = rows[0]
+    assert restored["is_deleted"] == 0
+    assert restored["in_project_scope"] == 0
+    assert restored["processing_status"] == "out_of_scope"
+    assert restored["parent_folder_id"] == "OUTSIDE"  # 현재 실제 parent로 갱신
+    assert restored["internal_content_version"] == deleted["internal_content_version"]
+
+    events = conn.execute(
+        "SELECT event_type, details FROM processing_events WHERE drive_file_id = 'F1' ORDER BY event_id"
+    ).fetchall()
+    assert [e["event_type"] for e in events] == ["new", "deleted", "restored"]
+    import json
+    assert json.loads(events[-1]["details"])["in_scope"] is False
 
 
 # Google Workspace Native 파일 — 변경은 기록하되 내용은 조회하지 않음 -----------------------
@@ -297,7 +377,12 @@ def test_binary_checksum_unavailable_marks_unverified_without_download(conn, con
     assert row["internal_content_version"] == 1  # 확인되지 않은 변경이므로 버전은 올리지 않음
 
 
-# Case1: 프로젝트 외부 파일 변경 — scope_matched = 0 --------------------------------------
+# Case1: 프로젝트 외부의 미등록 파일 변경 — 완전히 무시(Registry/Event 물질화 금지) --------------
+# [정책 변경] 이전에는 report["out_of_scope"] == 1 을 기대하며 files/processing_events에
+# out_of_scope row/event를 생성했다. Drive Changes API가 계정 전체 변경을 반환하므로,
+# 프로젝트가 한 번도 관리한 적 없는 외부 파일(existing is None)을 매 실행마다 Registry/Event로
+# 물질화하는 것은 아키텍처 원칙 위반이자 무한 증가의 원인이었다. 이제는 ignored_external
+# 카운터만 올리고 아무것도 저장하지 않는다.
 
 def test_external_file_change_never_scope_matched(conn, config):
     fake = _bootstrap_with_one_file(conn, config)
@@ -307,21 +392,150 @@ def test_external_file_change_never_scope_matched(conn, config):
 
     assert report["scope_matched"] == 0
     assert report["content_downloads"] == 0
+    assert report["claude_api_calls"] == 0
+    assert report["out_of_scope"] == 0
+    assert report["ignored_external"] == 1
+
+    assert conn.execute(
+        "SELECT * FROM files WHERE drive_file_id = 'EXT'"
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT * FROM processing_events WHERE drive_file_id = 'EXT'"
+    ).fetchall() == []
+
+
+# Test A: unknown external file — Registry/Event 물질화 금지 -------------------------------
+
+def test_unknown_external_file_change_is_ignored(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)  # F1: parent=ROOT (scope 안)
+    fake.add_file("EXT", "unrelated.pdf", "application/pdf", parent="OUTSIDE", checksum="hx")
+
+    report = run_incremental(conn, config, fake)
+
+    assert report["out_of_scope"] == 0
+    assert report["ignored_external"] == 1
+    assert report["content_downloads"] == 0
+    assert report["claude_api_calls"] == 0
+    assert report["new"] == []
+
+    assert conn.execute("SELECT * FROM files WHERE drive_file_id = 'EXT'").fetchone() is None
+    assert conn.execute(
+        "SELECT * FROM processing_events WHERE drive_file_id = 'EXT'"
+    ).fetchall() == []
+
+
+# Test B: external file repeated changes — 누적 없음 -------------------------------------
+
+def test_external_file_repeated_changes_do_not_accumulate(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)
+    fake.add_file("EXT", "unrelated.pdf", "application/pdf", parent="OUTSIDE", checksum="hx")
+    run_incremental(conn, config, fake)  # add_file change 소비 (이미 무시됨)
+
+    events_baseline = conn.execute(
+        "SELECT COUNT(*) c FROM processing_events WHERE project_id = ?", (config.project_id,)
+    ).fetchone()["c"]
+    files_baseline = conn.execute(
+        "SELECT COUNT(*) c FROM files WHERE project_id = ?", (config.project_id,)
+    ).fetchone()["c"]
+
+    for i in range(3):
+        fake.modify_file("EXT", modifiedTime=f"t{i}", md5Checksum=f"hx{i}")
+        report = run_incremental(conn, config, fake)
+        assert report["ignored_external"] == 1
+        assert report["out_of_scope"] == 0
+
+        assert conn.execute(
+            "SELECT COUNT(*) c FROM processing_events WHERE project_id = ?", (config.project_id,)
+        ).fetchone()["c"] == events_baseline
+        assert conn.execute(
+            "SELECT COUNT(*) c FROM files WHERE project_id = ?", (config.project_id,)
+        ).fetchone()["c"] == files_baseline
+
+
+# Test C: ignored external → project scope 진입 시 new project file로 정상 등록 ---------------
+
+def test_ignored_external_file_later_enters_scope_registers_as_new(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)
+    fake.add_file("EXT", "unrelated.pdf", "application/pdf", parent="OUTSIDE", checksum="hx")
+
+    run_incremental(conn, config, fake)  # run 1: 무시됨
+    assert conn.execute("SELECT * FROM files WHERE drive_file_id = 'EXT'").fetchone() is None
+
+    fake.modify_file("EXT", parents=["ROOT"])  # run 2: 프로젝트 root로 이동
+    report = run_incremental(conn, config, fake)
+
+    assert report["new"] == ["unrelated.pdf"]
+
+    rows = conn.execute("SELECT * FROM files WHERE drive_file_id = 'EXT'").fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["processing_status"] == "registered"
+    assert row["in_project_scope"] == 1
+    assert row["is_deleted"] == 0
+
+    events = conn.execute(
+        "SELECT event_type FROM processing_events WHERE drive_file_id = 'EXT' ORDER BY event_id"
+    ).fetchall()
+    assert [e["event_type"] for e in events] == ["new"]  # 과거 out_of_scope 이벤트 없음
+
+
+# Test D: managed project file → scope 밖 이동 — Case A는 그대로 유지되어야 한다 ---------------
+
+def test_managed_file_move_out_of_scope_still_logs_out_of_scope(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)  # F1: parent=ROOT, scope=1
+    fake.modify_file("F1", parents=["OUTSIDE"])
+
+    report = run_incremental(conn, config, fake)
+
     assert report["out_of_scope"] == 1
+    assert report["ignored_external"] == 0
+
+    rows = conn.execute("SELECT * FROM files WHERE drive_file_id = 'F1'").fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["in_project_scope"] == 0
+    assert row["processing_status"] == "out_of_scope"
+
+    events = conn.execute(
+        "SELECT event_type FROM processing_events WHERE drive_file_id = 'F1' ORDER BY event_id"
+    ).fetchall()
+    assert [e["event_type"] for e in events] == ["new", "out_of_scope"]
 
 
-# Case5: excluded_folder_ids에 속한 파일 변경 — out_of_scope --------------------------------
+# Test E / Case5: excluded_folder_ids의 "미등록 신규 파일"도 external unknown과 동일하게 무시 -----
+# [정책 변경] 이전에는 excluded 폴더의 신규 파일에 대해 files row(out_of_scope) + event를
+# 생성했다. 정책 1에 따라 existing is None 이고 현재 scope 대상이 아니면(excluded 포함)
+# 완전히 무시한다 — Registry/Event 생성 금지.
 
-def test_excluded_folder_file_is_out_of_scope(conn, config):
+def test_excluded_folder_new_file_is_ignored(conn, config):
     fake = _bootstrap_with_one_file(conn, config)
     fake.add_file("F2", "excluded.pdf", "application/pdf", parent="EXCLUDED", checksum="h2")
 
     report = run_incremental(conn, config, fake)
 
-    assert report["out_of_scope"] == 1
+    assert report["out_of_scope"] == 0
+    assert report["ignored_external"] == 1
     assert report["new"] == []
+
+    assert conn.execute("SELECT * FROM files WHERE drive_file_id = 'F2'").fetchone() is None
+    assert conn.execute(
+        "SELECT * FROM processing_events WHERE drive_file_id = 'F2'"
+    ).fetchall() == []
+
+
+# Test E-2: 이미 관리 중이던 파일이 excluded 폴더로 이동 — Case A 상태 전이 기록 -----------------
+
+def test_managed_file_moved_into_excluded_folder_logs_out_of_scope(conn, config):
+    fake = _bootstrap_with_one_file(conn, config)  # F1: parent=ROOT, scope=1
+    fake.modify_file("F1", parents=["EXCLUDED"])
+
+    report = run_incremental(conn, config, fake)
+
+    assert report["out_of_scope"] == 1
+    assert report["ignored_external"] == 0
+
     row = conn.execute(
-        "SELECT in_project_scope, processing_status FROM files WHERE drive_file_id = 'F2'"
+        "SELECT in_project_scope, processing_status FROM files WHERE drive_file_id = 'F1'"
     ).fetchone()
     assert row["in_project_scope"] == 0
     assert row["processing_status"] == "out_of_scope"

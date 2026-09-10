@@ -59,8 +59,10 @@ class FakeDriveClient:
         raw["trashed"] = True
         self._record_change(file_id, raw)
 
-    def untrash_file(self, file_id):
+    def restore_file(self, file_id, **kwargs):
+        """휴지통에서 복원. kwargs로 복원과 동시에 일어난 metadata 변경(parents 등)도 반영."""
         raw = self._files[file_id]
+        raw.update(kwargs)
         raw["trashed"] = False
         self._record_change(file_id, raw)
 
