@@ -12,6 +12,8 @@ from typing import Optional
 
 import yaml
 
+from engine.wbs.config import WBSConfig
+
 PROJECTS_DIR = Path(__file__).resolve().parents[2] / "projects"
 
 PLACEHOLDER_VALUES = {"", "CHANGE_ME", None}
@@ -36,6 +38,8 @@ class ProjectConfig:
     project_name: str
     drive: DriveConfig
     scope_config_version: int
+    # 선택적 WBS(Google Sheets) 소스. config.yaml에 'wbs' 섹션이 없으면 None.
+    wbs: Optional[WBSConfig] = None
 
 
 def _resolve_root_folder_id(project_id: str, raw_value: Optional[str]) -> str:
@@ -89,9 +93,13 @@ def load_project_config(project_id: str) -> ProjectConfig:
             f"디렉터리명({project_id})과 config.yaml의 project_id({project_id_in_file})가 일치하지 않습니다."
         )
 
+    wbs_raw = raw.get("wbs")
+    wbs = WBSConfig.from_raw(wbs_raw, project_id=project_id) if wbs_raw is not None else None
+
     return ProjectConfig(
         project_id=project_id_in_file,
         project_name=raw.get("project_name", project_id_in_file),
         drive=drive,
         scope_config_version=int(scope_raw.get("config_version", 1)),
+        wbs=wbs,
     )

@@ -5,3 +5,7 @@ google-auth-httplib2>=0.1.1
 PyYAML>=6.0.1
 python-dotenv>=1.0.0
 pytest>=7.4.0
+
+# stdlib zoneinfo의 IANA timezone 데이터 제공(특히 Windows — 시스템 tz DB 부재 대응).
+# WBS Daily To-Do의 날짜 판정 timezone(기본 Asia/Seoul) 검증에 필요.
+tzdata>=2024.1
