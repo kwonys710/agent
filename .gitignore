@@ -13,3 +13,11 @@ token.json
 
 *.egg-info/
 .pytest_cache/
+
+# DailyReels runtime artifacts (원본 영상 및 결과물은 git에 넣지 않는다)
+/*.mp4
+/*.mov
+/*.m4v
+data/manifest.json
+output/
+logs/

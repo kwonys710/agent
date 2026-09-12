@@ -1,0 +1,30 @@
+# DailyReels configuration. Paths and behaviour live here, not in code.
+
+[paths]
+# root = "G:\\내 드라이브\\DailyReels"   # overridden by DAILYREELS_ROOT
+data_dir = "data"
+output_dir = "output"
+logs_dir = "logs"
+
+[scan]
+# Only files sitting directly in the root are input. No recursion.
+video_extensions = [".mp4", ".mov", ".m4v"]
+excluded_dirs = ["app", "data", "output", "logs"]
+timezone = "Asia/Seoul"
+
+[render]
+# v0.4
+width = 1080
+height = 1920
+target_duration = 42
+max_duration = 59
+output_name = "DailyReel_{date}.mp4"
+
+[caption_style]
+# v0.3+ — kept out of code on purpose.
+time_format = "%H:%M"
+font_size = 64
+time_font_size = 48
+position = "bottom"
+margin_ratio = 0.12
+color = "#FFFFFF"
