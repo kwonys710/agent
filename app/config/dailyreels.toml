@@ -13,18 +13,35 @@ excluded_dirs = ["app", "data", "output", "logs"]
 timezone = "Asia/Seoul"
 
 [render]
-# v0.4
+# v0.5 renderer — Instagram Reel compatible defaults
 width = 1080
 height = 1920
+fps = 30
+video_codec = "libx264"
+preset = "medium"
+crf = 20
+audio_mode = "mute"          # mute | original  (Instagram에서 음악을 얹는다)
+trim_mode = "center"         # center | plan    (center = 원본 중앙 구간 사용)
 target_duration = 42
 max_duration = 59
 output_name = "DailyReel_{date}.mp4"
 
 [caption_style]
-# v0.3+ — kept out of code on purpose.
+# 가독성 우선. 값만 바꾸면 되고 코드는 건드리지 않는다.
 time_format = "%H:%M"
-font_size = 64
-time_font_size = 48
-position = "bottom"
-margin_ratio = 0.12
+body_font_size = 64
+time_font_size = 44
+hook_font_size = 92
+hook_max_lines = 2
 color = "#FFFFFF"
+outline_color = "#000000"
+outline = 4
+shadow = 2
+hook_outline = 5
+box = false
+box_opacity = 0.45
+bottom_margin = 340          # Instagram UI를 피한 safe area (1920 기준)
+side_margin = 90
+# font_file = ""             # CAPTION_FONT_FILE 로도 지정 가능
+# font_name = ""             # CAPTION_FONT_NAME
+preferred_fonts = ["Paperlogy", "Malgun Gothic", "Noto Sans KR", "NanumGothic"]

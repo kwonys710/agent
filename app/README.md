@@ -67,6 +67,42 @@ G:\내 드라이브\DailyReels\data\manifest.json
 `captured_at_source`에 `creation_time` / `file_mtime`을 기록한다.
 읽지 못한 파일은 건너뛰고 manifest의 `errors`에 남는다.
 
+## 렌더 (v0.5)
+
+```powershell
+python -m dailyreels render
+```
+
+`data\edit_plan.json` → `output\DailyReel_YYYY-MM-DD.mp4` 1개를 만든다.
+Renderer는 AI를 호출하지 않는다. edit_plan + 원본 영상 + FFmpeg만 사용한다.
+
+| 옵션 | 설명 |
+| --- | --- |
+| `--plan PATH` | 다른 edit_plan 사용 |
+| `--keep-temp` | `data\render_tmp` 세그먼트 보존 (렌더 실패 시에는 자동 보존) |
+| `--no-preview` | QC용 preview 프레임 생략 |
+
+동작:
+
+- Hook clip을 맨 앞에 놓고, 본문에 같은 clip이 있으면 중복 제거
+- 각 clip은 원본 중앙 구간 사용: `start = max(0, (source_duration - use_duration) / 2)`
+  (`render.trim_mode = "plan"`으로 바꾸면 plan의 `start` 값을 사용)
+- `use_duration`은 원본 길이로 clamp
+- 1080x1920 / 30fps / H.264 / yuv420p / `+faststart`, 비율 유지 후 center crop (stretch 없음)
+- FFmpeg autorotation만 사용 (rotation filter 중복 적용 안 함)
+- 자막은 ASS로 생성해 burn-in. 본문은 `시간` + `caption` 2줄, Hook은 화면 중앙 큰 글씨 2줄
+- 오디오는 기본 `mute` (`render.audio_mode = "original"`로 변경 가능)
+- 기존 출력물은 덮어쓰지 않고 `_v02`, `_v03`으로 증가
+- 렌더 후 ffprobe로 해상도/길이/코덱 재검증, `data\preview\`에 QC 스크린샷 3장
+
+edit_plan.json 필드는 v0.4 출력 형태를 그대로 읽되 별칭을 허용한다:
+`file|filename|source|path`, `duration|use_duration`, `time|time_label`, `caption|text`,
+`source_duration`(없으면 ffprobe로 측정), `hook`(object / clip 참조 / 문자열).
+
+자막 폰트는 `CAPTION_FONT_FILE` → `CAPTION_FONT_NAME` → config `preferred_fonts`
+(Paperlogy → Malgun Gothic → Noto Sans KR → NanumGothic) 순으로 찾는다.
+폰트 파일은 프로젝트로 복사하지 않고 설치된 위치를 그대로 참조한다.
+
 ## 테스트
 
 ```powershell
@@ -78,6 +114,6 @@ FFmpeg가 없는 환경에서는 실제 영상이 필요한 테스트(`test_ffpr
 ## 상태
 
 - v0.1 Scanner / Metadata — 완료
-- v0.2 Scene Analyzer — 예정
-- v0.3 Story Planner (`edit_plan.json`) — 예정
-- v0.4 Renderer — 예정
+- v0.2~v0.4 Scene Analyzer / Story Planner (`edit_plan.json`) — 완료 (로컬 검증)
+- v0.5 FFmpeg Renderer — 완료
+- v0.6 one-command `dailyreels run` — 예정

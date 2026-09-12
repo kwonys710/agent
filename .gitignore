@@ -21,3 +21,7 @@ token.json
 data/manifest.json
 output/
 logs/
+data/render_tmp/
+data/preview/
+data/edit_plan.json
+data/analysis.json
