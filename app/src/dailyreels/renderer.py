@@ -22,6 +22,7 @@ from dailyreels.subtitles import CaptionStyle, body_text, build_ass, hook_text
 log = logging.getLogger(__name__)
 
 TEMP_DIRNAME = "render_tmp"
+ANALYSIS_FILENAME = "analysis.json"
 PREVIEW_DIRNAME = "preview"
 DURATION_TOLERANCE = 0.75  # seconds, concat/keyframe slack
 
@@ -43,6 +44,25 @@ class RenderResult:
     font: FontChoice
     previews: list[Path] = field(default_factory=list)
     temp_dir: Path | None = None
+
+
+def load_clip_index(data_dir: Path) -> dict[str, str]:
+    """clip_id -> source filename, from v0.3 analysis.json. Read-only, no AI calls."""
+    import json
+
+    path = data_dir / ANALYSIS_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        log.warning("could not read %s: %s", path, exc)
+        return {}
+    index: dict[str, str] = {}
+    for entry in payload.get("clips", []) or []:
+        if isinstance(entry, dict) and entry.get("clip_id") and entry.get("file"):
+            index[str(entry["clip_id"])] = str(entry["file"])
+    return index
 
 
 def _setting(settings: Settings, key: str, default: Any) -> Any:
@@ -243,6 +263,7 @@ def render(
         root=settings.root,
         trim_mode=str(_setting(settings, "trim_mode", "center")),
         duration_of=duration_of,
+        clip_files=load_clip_index(settings.data_dir),
     )
 
     style = CaptionStyle.from_config(settings.caption_style)

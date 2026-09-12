@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 log = logging.getLogger(__name__)
 
@@ -125,10 +125,19 @@ def _build_clip(
     duration_of: Callable[[Path], float] | None,
     is_hook: bool,
     index: int,
+    clip_files: Mapping[str, str] | None = None,
 ) -> RenderClip:
+    clip_id = str(_first(raw, _ID_KEYS) or f"clip_{index + 1:03d}")
+
     filename = _first(raw, _FILE_KEYS)
+    if not filename and clip_files:
+        # v0.4 writes the hook as {clip_id, caption, duration}; analysis.json holds the file.
+        filename = clip_files.get(clip_id)
     if not filename:
-        raise EditPlanError(f"clip #{index + 1} has no source file field")
+        raise EditPlanError(
+            f"{clip_id} has no source file in edit_plan.json"
+            " and could not be resolved from data/analysis.json"
+        )
 
     path = Path(str(filename))
     if not path.is_absolute():
@@ -153,7 +162,7 @@ def _build_clip(
         start = center_start(source_duration, use_duration)
 
     return RenderClip(
-        clip_id=str(_first(raw, _ID_KEYS) or f"clip_{index + 1:03d}"),
+        clip_id=clip_id,
         file=path.name,
         path=path,
         source_duration=source_duration,
@@ -181,6 +190,8 @@ def _hook_raw(plan: dict[str, Any], clips: list[dict[str, Any]]) -> tuple[dict[s
                 if text:
                     merged["caption"] = text
                 return merged, text
+        if ref:  # hook clip lives outside the timeline; resolve its file by clip_id
+            return hook, text
         return None, text
 
     for raw in clips:  # clip flagged inside the timeline
@@ -197,6 +208,7 @@ def build_render_plan(
     root: Path,
     trim_mode: str = "center",
     duration_of: Callable[[Path], float] | None = None,
+    clip_files: Mapping[str, str] | None = None,
 ) -> RenderPlan:
     """Normalise edit_plan.json into an ordered, validated clip list. No AI calls."""
     raw_clips = _raw_clips(plan)
@@ -207,13 +219,13 @@ def build_render_plan(
 
     hook_clip: RenderClip | None = None
     if hook_raw is not None:
-        hook_clip = _build_clip(hook_raw, root, trim_mode, duration_of, True, 0)
+        hook_clip = _build_clip(hook_raw, root, trim_mode, duration_of, True, 0, clip_files)
         if hook_text:
             hook_clip = RenderClip(**{**hook_clip.__dict__, "caption": hook_text})
         clips.append(hook_clip)
 
     for index, raw in enumerate(raw_clips):
-        clip = _build_clip(raw, root, trim_mode, duration_of, False, index)
+        clip = _build_clip(raw, root, trim_mode, duration_of, False, index, clip_files)
         if hook_clip is not None and (
             clip.file == hook_clip.file or clip.clip_id == hook_clip.clip_id
         ):
