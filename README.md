@@ -1,3 +1,5 @@
+> 이 저장소에는 두 프로젝트가 있다. DailyReels는 `app/`에 있다 → [app/README.md](app/README.md)
+
 # PM Automation Engine — MVP 1단계 (Google Drive Incremental Scan)
 
 이번 단계의 목적은 하나다:
