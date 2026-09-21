@@ -20,7 +20,10 @@ from targeting_agent.core.models import RawCandidate  # noqa: E402
 
 @pytest.fixture()
 def config() -> Config:
-    return load_config(PACKAGE_ROOT / "config.yaml", load_env=False)
+    """테스트용 설정. 실제 Claude CLI를 호출하지 않도록 ai.provider를 내린다."""
+    loaded = load_config(PACKAGE_ROOT / "config.yaml", load_env=False)
+    raw = {**loaded.raw, "ai": {**loaded.raw.get("ai", {}), "provider": "heuristic"}}
+    return Config(raw=raw, path=loaded.path, base_dir=loaded.base_dir)
 
 
 @pytest.fixture()

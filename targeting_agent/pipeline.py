@@ -18,7 +18,8 @@ from .actions.controller import ActionController, ExecutionSummary
 from .actions.executors import create_executor
 from .actions.queue import ActionQueueBuilder, QueueBuildResult, merge_results
 from .actions.rate_limiter import RateLimiter
-from .analysis.content_analyzer import ContentAnalyzer
+from .ai.intelligence import ClaudeIntelligence, UsageStats
+from .analysis.content_analyzer import ContentAnalyzer, merge_claude_analysis
 from .analysis.profile_analyzer import TargetProfile, load_profile
 from .analysis.scorer import TargetScorer, disqualify_reason, persist_score
 from .comments.duplicate_filter import CommentDuplicateFilter
@@ -90,6 +91,8 @@ class RunSummary:
     ingest: Optional[ImportSummary] = None
     profile_source: str = "file"
     weights_source: str = "config"
+    ai_usage: Optional[UsageStats] = None
+    ai_available: bool = False
 
 
 class TargetingPipeline:
@@ -113,6 +116,7 @@ class TargetingPipeline:
         self.weights_override = load_weights_override(conn)
         self.scorer = TargetScorer(config, self.profile, self.weights_override)
         self.comment_generator = CommentGenerator(config, self.profile, seed=seed)
+        self.intelligence = ClaudeIntelligence(config, self.profile)
         self.tz_offset = int(config.get("actions.daily_limits.timezone_offset_hours", 9))
         self.date = today_str(self.tz_offset)
         self.summary = RunSummary(
@@ -122,6 +126,8 @@ class TargetingPipeline:
             analyzer=self.analyzer.active_name,
             profile_source="db(학습 반영)" if self.profile.source == "db" else "file",
             weights_source=self.scorer.weights_source,
+            ai_usage=self.intelligence.usage,
+            ai_available=self.intelligence.available(),
         )
 
     # --- Phase 2: Discovery ---------------------------------------------
@@ -245,6 +251,16 @@ class TargetingPipeline:
                 stats.analyzed += 1
 
                 breakdown = self.scorer.score(media, analysis)
+
+                # Pre-filter를 통과한 후보만 Claude로 보낸다(호출 1회, 재시도 없음).
+                if self.intelligence.enabled:
+                    intel = self.intelligence.analyze(
+                        self.conn, media, heuristic_score=breakdown.total
+                    )
+                    if intel.ok and intel.analysis is not None:
+                        analysis = merge_claude_analysis(analysis, intel.analysis)
+                        breakdown = self.scorer.score(media, analysis)
+
                 persist_score(self.conn, media_pk, analysis, breakdown)
 
                 reason = disqualify_reason(self.config, media, analysis, breakdown)
@@ -390,6 +406,7 @@ def format_summary(summary: RunSummary, config: Config) -> str:
         f" Executor    : {summary.executor} (dry_run={summary.dry_run})",
         f" Analyzer    : {summary.analyzer}",
         f" Profile     : {summary.profile_source} (가중치 {summary.weights_source})",
+        f" AI Engine   : {'claude_code' if summary.ai_available else 'heuristic only'}",
         "",
         " Discovery",
         f"   Found     : {summary.discovery.found}",
@@ -435,6 +452,22 @@ def format_summary(summary: RunSummary, config: Config) -> str:
     ]
     if summary.execution.awaiting:
         lines.append(f"   확인 대기 : {summary.execution.awaiting} (처리 후 --confirm)")
+    usage = summary.ai_usage
+    if usage and (usage.claude_calls or usage.cache_hits or usage.prefiltered):
+        lines += [
+            "",
+            " AI (Claude Code)",
+            f"   호출       : {usage.claude_calls}",
+            f"   Cache Hit  : {usage.cache_hits}",
+            f"   Pre-filter : {usage.prefiltered}",
+            f"   한도 제한  : {usage.limited}",
+        ]
+        if usage.cost_usd:
+            lines.append(f"   비용(USD)  : {usage.cost_usd:.4f}")
+        if usage.failures:
+            reasons = ", ".join(f"{k}={v}" for k, v in sorted(usage.failures.items()))
+            lines.append(f"   실패       : {reasons}")
+
     if summary.execution.skip_reasons:
         reasons = ", ".join(f"{k}={v}" for k, v in sorted(summary.execution.skip_reasons.items()))
         lines.append(f"   Skip 사유 : {reasons}")

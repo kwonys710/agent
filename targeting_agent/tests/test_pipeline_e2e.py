@@ -30,6 +30,8 @@ def _tmp_config(tmp_path: Path, **overrides) -> Path:
         "cache_dir": str(tmp_path / "data" / "cache"),
     }
     raw["profile"] = {"path": str(PACKAGE_ROOT / "profiles" / "dailyreels.yaml")}
+    # 단위/E2E 테스트는 실제 Claude CLI를 호출하지 않는다(Phase 13 원칙).
+    raw["ai"] = {**raw.get("ai", {}), "provider": "heuristic"}
     raw["discovery"] = {**raw["discovery"], "import": {"path": str(SAMPLE_CSV)}}
     for key, value in overrides.items():
         raw[key] = value

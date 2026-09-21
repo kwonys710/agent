@@ -66,33 +66,33 @@
 
 일괄 등록, 중복 안내, 입력 이력 확인 등. 12A 운영 경험 후 착수.
 
-### Phase 13 — AI 분석·댓글 실사용 (Gemini, Free Tier부터)
+### Phase 13 — AI Intelligence = Claude Code CLI (방향 변경, 완료)
 
-- **Paid Tier를 전제하지 않는다.** Free Tier로 실호출 검증 → 사용량·Rate Limit 측정 → 필요 시 유료 전환
-- API Key가 없으면 Adapter / Prompt / Cache / Fallback까지 구현해두고, Key 입력 즉시 테스트 가능하게 한다
-- 프롬프트 파일화(`prompts/*.txt`) + `prompt_version` 관리 → 변경 시에만 캐시 무효화
-- 인증 방식은 **작업 시점의 Gemini 공식 문서와 google-genai SDK를 확인한 뒤** 구현한다
-  (기존 standard key 방식을 그대로 가정하지 않는다). Key는 `.env`/환경변수에서만 읽는다.
+**Gemini/OpenAI/Anthropic API SDK를 사용하지 않는다.** 로컬에 설치·로그인된
+Claude Code CLI를 subprocess로 호출해 콘텐츠 이해를 맡긴다(운영자 결정, 2026-09-21).
 
-Cost Guard (`config.yaml`):
+- Python: ingestion, 정규화, SQLite, 캐시, 중복 제거, **결정론적 점수 계산**, Action Queue, 한도 관리
+- Claude Code: 콘텐츠 이해, topic 분류, 의미적 관련성, 댓글 후보 3개
 
 ```yaml
 ai:
-  provider: gemini
-  daily_request_limit: 50
-  max_candidates_per_ai_batch: 20
+  provider: claude_code
+  model: sonnet
+  daily_request_limit: 20
+  max_candidates_per_run: 10
+  max_turns: 1
   use_cache: true
   fallback_to_heuristic: true
-  stop_on_budget_limit: true
+  prompt_version: "1.0"
+  prefilter_min_score: 60
 ```
 
-재호출 조건 — 아래가 아니면 **항상 캐시/DB를 쓴다**
-(Content Analysis, Profile Analysis, Comment Draft, Embedding, Similarity, AI Classification 공통):
-
-- source 변경 / `prompt_version` 변경 / model 변경 / 이전 분석 실패 / 사용자가 `--reanalyze` 명시
-
-Rate Limit 처리: `429` 또는 `RESOURCE_EXHAUSTED` → **로그 기록 → heuristic fallback → 파이프라인 계속**.
-무한 재시도 금지, 동일 요청 반복 호출 금지, 프로그램 전체 실패 금지.
+- Cache Key = SHA256(model + prompt_version + normalized_candidate_input)
+- 동일 Candidate + 동일 Prompt + 동일 Model → 재호출하지 않는다
+- Pre-filter(heuristic) → 캐시 → 실행 한도 → 일일 한도 순으로 게이트
+- 실패(CLAUDE_UNAVAILABLE / INVALID_JSON / INVALID_SCHEMA / TIMEOUT / USAGE_LIMIT / CLI_ERROR)는
+  즉시 재시도하지 않고 heuristic fallback으로 진행한다
+- Runtime Claude는 Repository를 보지 않는다(빈 임시 디렉터리에서 실행, 개발 세션 상속 금지)
 
 ### Phase 14 — Dashboard Action UI
 
@@ -168,7 +168,7 @@ Rate Limit 처리: `429` 또는 `RESOURCE_EXHAUSTED` → **로그 기록 → heu
 ```
 11A (Feasibility Spike)
   → 12A (Candidate Input Fallback 기본 확보)
-  → 13  (Gemini 실사용 + Prompt Version + Cache + Heuristic fallback)
+  → 13  (Claude Code Runtime + Prompt Version + Cache + Heuristic fallback) ✔ 완료
   → 14  (Dashboard Action UI)
   → 11B (11A가 GO/LIMITED GO일 때만 Commenter Discovery 구현)
   → 16A (Response Tracking)

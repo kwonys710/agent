@@ -109,14 +109,22 @@ class TargetScorer:
     ) -> ScoreBreakdown:
         """한 후보의 Target Score를 계산한다."""
         notes: list[str] = []
-        components = {
-            "content_similarity": profile_similarity(
+        # Claude가 판단한 의미적 관련성이 있으면 그것을 쓰고, 없으면 규칙 기반 유사도를 쓴다.
+        # 나머지 구성요소와 최종 점수는 항상 Python이 결정론적으로 계산한다.
+        if analysis.relevance_score is not None:
+            content_similarity = max(0.0, min(1.0, float(analysis.relevance_score)))
+            notes.append("similarity:claude")
+        else:
+            content_similarity = profile_similarity(
                 analysis.keywords,
                 analysis.topics,
                 str(media_row.get("caption") or ""),
                 self.profile.all_keywords,
                 self.profile.topics,
-            ),
+            )
+            notes.append("similarity:heuristic")
+        components = {
+            "content_similarity": content_similarity,
             "creator_fit": creator_fit(
                 int(media_row.get("followers") or 0),
                 min_followers=self.min_followers,

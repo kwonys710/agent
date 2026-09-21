@@ -1,18 +1,16 @@
 """콘텐츠 분석기.
 
-provider:
-- "heuristic": 캡션/해시태그 기반 규칙 분석. 외부 API 비용 0, 오프라인 동작.
-- "gemini"   : Gemini API 사용. API Key가 없거나 호출 실패 시
-               analysis.fallback_to_heuristic 설정에 따라 heuristic으로 대체.
+분석 계층은 두 단계다.
+1. heuristic  : 캡션/해시태그 기반 규칙 분석. 비용 0, 항상 먼저 수행한다.
+2. Claude Code: `ai.provider: claude_code`일 때 의미 판단을 덧입힌다(Phase 13).
+   Claude를 쓸 수 없거나 한도에 걸리면 1번 결과로 그대로 진행한다.
 
-비용 절감 원칙:
-- 동일 media + 동일 analyzer/analyzer_version/prompt_version 조합은 DB 캐시를 재사용한다.
-- 캐시 무효화는 버전 값을 올려서 한다(config.analysis.analyzer_version/prompt_version).
+LLM API SDK(OpenAI/Gemini/Anthropic)는 사용하지 않는다.
+비용 절감 원칙: 동일 media + 동일 analyzer/version 조합은 DB 캐시를 재사용한다.
 """
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from typing import Any, Mapping, Optional, Sequence
 
@@ -110,69 +108,30 @@ class HeuristicAnalyzer:
         return f"[{'/'.join(topics)}] {head}".strip()
 
 
-class GeminiAnalyzer:
-    """Gemini API 기반 분석기.
+def merge_claude_analysis(base: ContentAnalysis, claude: Any) -> ContentAnalysis:
+    """heuristic 분석에 Claude의 콘텐츠 이해 결과를 덧입힌다.
 
-    google-genai 패키지와 GEMINI_API_KEY가 모두 있어야 동작한다.
-    둘 중 하나라도 없으면 available()이 False이고, 호출자가 fallback을 결정한다.
+    Claude는 의미 판단만 담당한다. 광고/민감 판정 같은 결정론적 플래그는
+    heuristic 결과를 유지한다(규칙을 모델 응답으로 덮어쓰지 않기 위함).
     """
-
-    name = "gemini"
-
-    PROMPT = (
-        "너는 인스타그램 릴스 콘텐츠 분석기다. 아래 게시물의 캡션과 해시태그를 보고 "
-        "JSON만 출력해라. 키: topics(문자열 배열, 최대 4개), keywords(문자열 배열, 최대 10개), "
-        "language(ko/en/mixed), tone(짧은 한국어 단어), summary(한국어 한 문장, 40자 이내), "
-        "is_ad(boolean), is_sensitive(boolean).\n\n캡션:\n{caption}\n\n해시태그: {hashtags}"
+    topics = [t for t in (claude.topics or []) if t] or base.topics
+    if claude.primary_topic and claude.primary_topic not in topics:
+        topics = [claude.primary_topic, *topics]
+    return ContentAnalysis(
+        topics=topics[:6],
+        keywords=base.keywords,
+        language=claude.language if claude.language != "unknown" else base.language,
+        tone=claude.mood or base.tone,
+        summary=claude.summary or base.summary,
+        is_ad=base.is_ad,
+        is_sensitive=base.is_sensitive,
+        analyzer="claude_code",
+        analyzer_version=base.analyzer_version,
+        prompt_version=base.prompt_version,
+        relevance_score=claude.relevance_score,
+        relevance_reason=claude.relevance_reason,
+        comment_candidates=list(claude.comment_candidates or []),
     )
-
-    def __init__(self, model: str, version: str = "1", prompt_version: str = "1") -> None:
-        self.model = model
-        self.version = version
-        self.prompt_version = prompt_version
-        self._client: Optional[Any] = None
-
-    def available(self) -> bool:
-        if not os.environ.get("GEMINI_API_KEY"):
-            logger.info("GEMINI_API_KEY가 없어 Gemini 분석을 사용할 수 없습니다.")
-            return False
-        try:  # pragma: no cover - 패키지 설치 환경에서만 실행
-            from google import genai  # type: ignore # noqa: F401
-        except ImportError:
-            logger.info("google-genai 패키지가 없어 Gemini 분석을 사용할 수 없습니다.")
-            return False
-        return True
-
-    def _get_client(self) -> Any:  # pragma: no cover - 실제 API 호출 경로
-        if self._client is None:
-            from google import genai  # type: ignore
-
-            self._client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        return self._client
-
-    def analyze(self, media: Mapping[str, Any], hashtags: Sequence[str]) -> ContentAnalysis:  # pragma: no cover
-        prompt = self.PROMPT.format(
-            caption=str(media.get("caption") or ""), hashtags=", ".join(hashtags)
-        )
-        response = self._get_client().models.generate_content(model=self.model, contents=prompt)
-        text = (getattr(response, "text", "") or "").strip()
-        payload = _extract_json(text)
-        analysis = ContentAnalysis.from_mapping(payload)
-        analysis.analyzer = self.name
-        analysis.analyzer_version = self.version
-        analysis.prompt_version = self.prompt_version
-        return analysis
-
-
-def _extract_json(text: str) -> Mapping[str, Any]:  # pragma: no cover - API 응답 경로
-    """```json 블록 등 잡음이 섞인 응답에서 JSON 객체만 추출한다."""
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        return {}
-    try:
-        return json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return {}
 
 
 class ContentAnalyzer:
@@ -183,35 +142,14 @@ class ContentAnalyzer:
         self.profile = profile
         self.analyzer_version = str(config.get("analysis.analyzer_version", "1"))
         self.prompt_version = str(config.get("analysis.prompt_version", "1"))
-        self.heuristic = HeuristicAnalyzer(profile, version=f"{self.analyzer_version}-p{profile.version}")
-        self.provider = str(config.get("analysis.provider", "heuristic"))
-        self.fallback = bool(config.get("analysis.fallback_to_heuristic", True))
-        self._gemini: Optional[GeminiAnalyzer] = None
-        self._active = self._resolve_active()
-
-    def _resolve_active(self) -> Any:
-        if self.provider == "gemini":
-            gemini = GeminiAnalyzer(
-                model=str(self.config.get("analysis.model", "gemini-2.0-flash")),
-                version=self.analyzer_version,
-                prompt_version=self.prompt_version,
-            )
-            if gemini.available():
-                self._gemini = gemini
-                return gemini
-            if not self.fallback:
-                from ..core.exceptions import AnalysisError
-
-                raise AnalysisError(
-                    "analysis.provider=gemini 인데 GEMINI_API_KEY 또는 google-genai가 없습니다. "
-                    "analysis.fallback_to_heuristic: true 로 두거나 Key를 설정하세요."
-                )
-            logger.warning("Gemini를 사용할 수 없어 heuristic 분석기로 대체합니다.")
-        return self.heuristic
+        self.heuristic = HeuristicAnalyzer(
+            profile, version=f"{self.analyzer_version}-p{profile.version}"
+        )
+        self._active = self.heuristic
 
     @property
     def active_name(self) -> str:
-        return getattr(self._active, "name", "heuristic")
+        return self.heuristic.name
 
     def analyze_media(
         self, conn: sqlite3.Connection, media_row: Mapping[str, Any]
@@ -229,14 +167,7 @@ class ContentAnalyzer:
             return ContentAnalysis.from_mapping(json.loads(cached["payload"])), True
 
         hashtags = _load_hashtags(media_row)
-        try:
-            analysis = analyzer.analyze(media_row, hashtags)
-        except Exception as exc:  # pragma: no cover - 외부 API 실패 경로
-            if analyzer is self.heuristic or not self.fallback:
-                raise
-            logger.warning("Gemini 분석 실패(%s) — heuristic으로 대체합니다.", exc)
-            analysis = self.heuristic.analyze(media_row, hashtags)
-
+        analysis = analyzer.analyze(media_row, hashtags)
         save_analysis(conn, media_pk, analysis)
         return analysis, False
 

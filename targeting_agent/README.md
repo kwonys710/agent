@@ -137,21 +137,56 @@ Target Score 가중치(`scoring.weights`) 합계는 1.0이어야 하며, 아니�
 내 콘텐츠 성격(평일/주말 키워드 등)은 `targeting_agent/profiles/dailyreels.yaml`에서 수정한다.
 코드 수정 없이 바꿀 수 있고, DB `app_state.target_profile`(JSON)에 값을 넣으면 그쪽이 우선한다.
 
-## 6. Credential
+## 6. AI Intelligence Engine (Phase 13)
+
+콘텐츠 이해는 **로컬에 설치·로그인된 Claude Code CLI**가 담당한다.
+OpenAI / Gemini / Anthropic API SDK를 사용하지 않으며, 별도의 LLM API Key도 필요 없다.
+
+```
+Python  : 후보 입력, 정규화, SQLite, 캐시, 중복 제거, 결정론적 점수, Action Queue, 한도 관리
+Claude  : 콘텐츠 이해, topic 분류, 의미적 관련성(relevance_score), 댓글 후보 3개
+```
+
+동작 확인(운영자 PC):
+
+```bat
+python -m targeting_agent.scripts.probe_claude_runtime
+```
+
+호출 규칙:
+
+- **후보 1개당 Claude 호출 최대 1회.** 분석과 댓글 생성을 한 번에 받는다.
+- 호출 전 게이트: 캐시 → Pre-filter(heuristic 점수) → 실행당 한도 → 일일 한도
+- Cache Key = `SHA256(model + prompt_version + 정규화된 후보 입력)`
+  → 같은 후보를 몇 번 처리해도 실제 호출은 1회
+- 실패(`CLAUDE_UNAVAILABLE` `INVALID_JSON` `INVALID_SCHEMA` `TIMEOUT` `USAGE_LIMIT` `CLI_ERROR`)는
+  **같은 요청을 재시도하지 않고** heuristic으로 진행한다 — 파이프라인이 멈추지 않는다
+- Runtime Claude는 프로젝트 파일을 보지 않는다(빈 임시 폴더에서 실행, `--restricted`,
+  Bash/Edit/Write 등 금지, 개발 세션을 이어받지 않음)
+- Claude가 만든 댓글도 기존 품질·중복 필터를 그대로 통과해야 한다
+- **최종 Target Score는 Python이 계산한다.** Claude 결과는 `content_similarity` 한 축에만 들어간다
+
+설정은 `config.yaml`의 `ai:` 섹션(`provider`, `model`, `daily_request_limit`,
+`max_candidates_per_run`, `prefilter_min_score`, `prompt_version`)에서 조정한다.
+`ai.provider: heuristic`으로 두면 Claude를 전혀 호출하지 않는다.
+
+프롬프트: `prompts/targeting_analysis_v1.md` (변경 시 `ai.prompt_version`을 올리면 캐시가 무효화된다)
+
+## 7. Credential
 
 `targeting_agent/.env` (`.env.example` 복사해서 사용):
 
 ```
-GEMINI_API_KEY=
 IG_ACCESS_TOKEN=
 IG_BUSINESS_ACCOUNT_ID=
 ```
 
-- Key가 없으면 AI 분석은 **규칙 기반(heuristic) 분석기**로 자동 대체되어 그대로 동작한다.
+LLM API Key는 필요 없다(Claude Code 로그인 상태를 사용).
+
 - 계정 ID/Password는 어디에도 저장하지 않는다.
 - `.env`와 `data/*.db`는 git에 올라가지 않는다(.gitignore).
 
-## 7. 실행 결과물
+## 8. 실행 결과물
 
 | 경로 | 내용 |
 | --- | --- |
@@ -159,7 +194,7 @@ IG_BUSINESS_ACCOUNT_ID=
 | `targeting_agent/data/exports/manual_actions_<run_id>.csv` | 수동 처리용 Action 목록 |
 | `targeting_agent/data/logs/targeting_<날짜>.log` | 실행 로그(기본 30일 보관) |
 
-## 8. Instagram 공식 API 지원 범위 (확인 결과)
+## 9. Instagram 공식 API 지원 범위 (확인 결과)
 
 ### 8-1. 읽기 — 지원
 | 항목 | 내용 |
@@ -190,7 +225,7 @@ Creator 단위 한도/cooldown을 적용할 수 없다. 따라서 `safety.skip_u
 > 위 내용은 구현 시점(2026-09)에 확인한 범위다. Meta 정책은 자주 바뀌므로
 > 실제 토큰/권한을 받은 뒤 공식 문서로 한 번 더 확인할 것.
 
-## 9. 실제 처리 흐름 (manual 모드)
+## 10. 실제 처리 흐름 (manual 모드)
 
 `--no-dry-run`으로 실행해도 프로그램이 Instagram에 접속하지 않는다.
 대신 처리 목록을 만들고 Action을 **확인 대기(APPROVED)** 상태로 둔다.
@@ -207,7 +242,7 @@ run_targeting.bat --skip 14        :: 안 한 건은 취소
 확인 대기 건도 일일 한도 계산에 포함되어, 한도를 넘는 목록이 만들어지지 않는다.
 Dry Run(기본)에서는 지금까지처럼 시뮬레이션으로 SUCCESS 처리된다.
 
-## 10. Feedback 학습 (Phase 10)
+## 11. Feedback 학습 (Phase 10)
 
 Machine Learning 모델은 쓰지 않는다. Feedback을 모아 **Profile 키워드와 Score 가중치 조정안**을
 계산하고, 운영자가 승인할 때만 반영한다.
@@ -246,7 +281,7 @@ run_targeting.bat --learn-reset   :: 되돌리기
   이후 실행에서 새 기준으로 다시 계산된다. 이미 처리된 후보는 `--rescore`로 되돌려야 다시 평가된다.
 - `learning.profile_update_interval_days`(기본 7) 이내 재반영은 건너뛴다.
 
-## 11. 안전 원칙
+## 12. 안전 원칙
 
 - 기본값은 Dry Run이며, 실제 자동 좋아요/댓글을 수행하지 않는다.
 - Rate Limit은 **플랫폼 제한 우회가 아니라 운영자가 정한 내부 보수적 한도**다.
@@ -257,18 +292,18 @@ run_targeting.bat --learn-reset   :: 되돌리기
   금지선을 지키면서 만들 수 있는 것이 사실상 없고, 제재 위험은 운영자 계정이 진다.
 - 플랫폼 경고/인증 요구가 감지되면 자동 실행을 즉시 중단한다.
 
-## 12. 테스트
+## 13. 테스트
 
 ```bash
 python -m pytest targeting_agent/tests -q
 ```
 
-## 13. 현재 구현 범위
+## 14. 현재 구현 범위
 
 | 상태 | 항목 |
 | --- | --- |
 | 구현 완료 | Config, SQLite, Logging, CSV/JSON/URL Import Discovery, 규칙 기반 분석, 유사도, Target Score, 댓글 생성/품질/중복 필터, Action Queue, Rate Limiter, ManualExecutor, Dry Run + 수동 확인 흐름, Dashboard, Feedback 기록/학습 반영 |
-| 선택 사용 | Gemini 분석/댓글 생성(API Key 필요) |
+| 구현 완료 | AI Intelligence = Claude Code CLI(캐시·한도·fallback 포함) |
 | 구현 완료(조건부) | HashtagDiscovery — 공식 API 토큰/권한 필요, Creator 미확인 제약 있음 |
 | 미지원 확인 | OfficialAPIExecutor 쓰기(공식 API에 해당 기능 없음) |
 | 구현 안 함(결정) | BrowserExecutor — Phase 9 검토 결과 미구현, `docs/phase9_browser_executor.md` 참고 |

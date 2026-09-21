@@ -94,6 +94,10 @@ class ContentAnalysis:
     analyzer: str = "heuristic"
     analyzer_version: str = "1"
     prompt_version: str = "1"
+    # Phase 13: Claude Code가 판단한 의미적 관련성과 댓글 후보(없으면 heuristic 결과)
+    relevance_score: Optional[float] = None
+    relevance_reason: str = ""
+    comment_candidates: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +111,9 @@ class ContentAnalysis:
             "analyzer": self.analyzer,
             "analyzer_version": self.analyzer_version,
             "prompt_version": self.prompt_version,
+            "relevance_score": self.relevance_score,
+            "relevance_reason": self.relevance_reason,
+            "comment_candidates": self.comment_candidates,
         }
 
     @classmethod
@@ -122,6 +129,11 @@ class ContentAnalysis:
             analyzer=str(data.get("analyzer") or "heuristic"),
             analyzer_version=str(data.get("analyzer_version") or "1"),
             prompt_version=str(data.get("prompt_version") or "1"),
+            relevance_score=(
+                float(data["relevance_score"]) if data.get("relevance_score") is not None else None
+            ),
+            relevance_reason=str(data.get("relevance_reason") or ""),
+            comment_candidates=list(data.get("comment_candidates") or []),
         )
 
 

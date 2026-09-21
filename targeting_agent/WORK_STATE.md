@@ -53,6 +53,16 @@ Phase 12A 완료: Candidate Input Fallback
 - import_events 테이블에 입력 이력 기록(ADDED/DUPLICATE/INVALID/ERROR)
 - schema v2 마이그레이션: 기존 DB에 canonical_url/instagram_media_id 컬럼만 추가
 
+Phase 13 완료 (방향 변경: Claude Code Runtime, LLM API SDK 미사용)
+- 13A Probe: claude 2.1.278, `claude -p --output-format json` 실제 호출 성공 → GO
+- ai/claude_runner.py: subprocess 호출(프롬프트는 stdin, 빈 임시 cwd, --restricted,
+  Bash/Edit/Write 금지, --strict-mcp-config, 개발 세션 상속 금지, 재시도 없음)
+- ai/schema.py: Pydantic 검증. CLI wrapper 성공과 payload 유효성을 분리해서 본다
+- ai/cache.py: SHA256(model+prompt_version+정규화 입력), 동일 후보 재호출 차단
+- ai/intelligence.py: 캐시 → Pre-filter → 실행 한도 → 일일 한도 게이트, heuristic fallback
+- 댓글은 Claude 후보 우선, 부족하면 템플릿 보충. 품질·중복 필터는 동일 적용
+- Target Score는 Python이 계산하고 Claude는 content_similarity에만 반영
+
 차단: 실계정 Probe 결과 확정 전까지 Phase 11B 본 구현 시작 금지
 
 Pending:

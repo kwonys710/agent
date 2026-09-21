@@ -6,13 +6,14 @@
 - 게시물당 후보 N개(기본 3개) 생성
 - 품질 필터 + 중복 필터를 통과할 때까지 재생성(최대 max_generation_attempts)
 
-provider:
-- "template": 맥락 슬롯 기반 생성(기본, 비용 0)
-- "gemini"  : Gemini 호출. 사용할 수 없으면 template으로 대체.
+댓글 출처:
+- Claude Code가 분석 단계에서 함께 만든 후보(있으면 우선 사용, 추가 호출 없음)
+- 템플릿 기반 생성(항상 사용 가능한 fallback)
+
+어느 쪽이든 품질/중복 필터를 동일하게 통과해야 한다.
 """
 from __future__ import annotations
 
-import os
 import random
 from typing import Any, Mapping, Optional, Sequence
 
@@ -160,60 +161,23 @@ class TemplateCommentGenerator:
         return proposals
 
 
-class GeminiCommentGenerator:
-    """Gemini 기반 생성기(선택). Key/패키지가 없으면 사용하지 않는다."""
+class ClaudeCandidateGenerator:
+    """Claude Code가 만든 댓글 후보를 제공하는 생성기(Phase 13).
 
-    name = "gemini"
+    새로 호출하지 않는다. 분석 단계에서 이미 받아온 후보를 쓰고,
+    모자라면 CommentGenerator가 템플릿으로 채운다.
+    """
+
+    name = "claude_code"
     version = "1"
 
-    PROMPT = (
-        "인스타그램 릴스에 남길 한국어 댓글 {count}개를 JSON 배열(문자열만)로 출력해라.\n"
-        "조건: 각 {min_len}~{max_len}자, 게시물 맥락 단어를 최소 1개 포함, 홍보/팔로우 유도 금지, "
-        "'잘 봤어요' 같은 일반적인 표현 금지, 과한 친밀감 금지, 이모지는 최대 1개.\n"
-        "게시물 요약: {summary}\n키워드: {keywords}\n"
-    )
+    def __init__(self, candidates: Sequence[str]) -> None:
+        self._candidates = [normalize_text(str(c)) for c in candidates if str(c).strip()]
 
-    def __init__(self, model: str, min_len: int, max_len: int) -> None:
-        self.model = model
-        self.min_len = min_len
-        self.max_len = max_len
-        self._client: Optional[Any] = None
-
-    def available(self) -> bool:
-        if not os.environ.get("GEMINI_API_KEY"):
-            return False
-        try:  # pragma: no cover
-            from google import genai  # type: ignore # noqa: F401
-        except ImportError:
-            return False
-        return True
-
-    def propose(  # pragma: no cover - 실제 API 호출 경로
+    def propose(
         self, media_row: Mapping[str, Any], analysis: ContentAnalysis, count: int
     ) -> list[str]:
-        import json
-
-        from google import genai  # type: ignore
-
-        if self._client is None:
-            self._client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        prompt = self.PROMPT.format(
-            count=count,
-            min_len=self.min_len,
-            max_len=self.max_len,
-            summary=analysis.summary or str(media_row.get("caption") or "")[:80],
-            keywords=", ".join(analysis.keywords[:10]),
-        )
-        response = self._client.models.generate_content(model=self.model, contents=prompt)
-        text = (getattr(response, "text", "") or "").strip()
-        start, end = text.find("["), text.rfind("]")
-        if start == -1 or end == -1:
-            return []
-        try:
-            items = json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return []
-        return [normalize_text(str(item)) for item in items if str(item).strip()]
+        return self._candidates[:count]
 
 
 class CommentGenerator:
@@ -228,16 +192,6 @@ class CommentGenerator:
             profile, allow_emoji=bool(config.get("comments.allow_emoji", True)), seed=seed
         )
         self._backend: Any = self.template
-        if str(config.get("comments.provider", "template")) == "gemini":
-            gemini = GeminiCommentGenerator(
-                model=str(config.get("analysis.model", "gemini-2.0-flash")),
-                min_len=int(config.get("comments.min_length", 5)),
-                max_len=int(config.get("comments.max_length", 60)),
-            )
-            if gemini.available():
-                self._backend = gemini
-            else:
-                logger.warning("Gemini 댓글 생성을 사용할 수 없어 template 생성기로 대체합니다.")
 
     @property
     def backend_name(self) -> str:
@@ -256,12 +210,51 @@ class CommentGenerator:
         rejected: list[CommentCandidate] = []
         seen: set[str] = set()
 
+        backends: list[Any] = []
+        if analysis.comment_candidates:
+            # 분석 때 받아온 Claude 후보를 먼저 쓴다(추가 호출 없음).
+            backends.append(ClaudeCandidateGenerator(analysis.comment_candidates))
+        backends.append(self._backend)
+
+        for backend in backends:
+            self._collect(
+                backend, media_row, analysis, duplicate_filter, context, accepted, rejected, seen
+            )
+            if len(accepted) >= self.count:
+                break
+
+        if not accepted:
+            logger.warning(
+                "media_id=%s 댓글 후보를 만들지 못했습니다(거절 %d건).",
+                media_row.get("media_id"),
+                len(rejected),
+            )
+        if accepted:
+            accepted[0].status = DraftStatus.SELECTED
+        return accepted + rejected
+
+    def _collect(
+        self,
+        backend: Any,
+        media_row: Mapping[str, Any],
+        analysis: ContentAnalysis,
+        duplicate_filter: CommentDuplicateFilter,
+        context: Sequence[str],
+        accepted: list[CommentCandidate],
+        rejected: list[CommentCandidate],
+        seen: set[str],
+    ) -> None:
+        """한 생성기에서 후보를 받아 품질/중복 필터를 적용한다."""
+        backend_name = getattr(backend, "name", "template")
+        backend_version = getattr(backend, "version", "1")
         for attempt in range(1, self.max_attempts + 1):
             need = self.count - len(accepted)
             if need <= 0:
-                break
+                return
             # 재시도할수록 더 많은 후보를 받아 통과 확률을 높인다.
-            proposals = self._backend.propose(media_row, analysis, need * attempt * 2)
+            proposals = backend.propose(media_row, analysis, need * attempt * 2)
+            if not proposals:
+                return
             for text in proposals:
                 if text in seen:
                     continue
@@ -272,8 +265,8 @@ class CommentGenerator:
                     rejected.append(
                         CommentCandidate(
                             text=text,
-                            generator=self.backend_name,
-                            generator_version=getattr(self._backend, "version", "1"),
+                            generator=backend_name,
+                            generator_version=backend_version,
                             quality_ok=False,
                             quality_reason=quality.reason,
                             status=DraftStatus.REJECTED,
@@ -286,8 +279,8 @@ class CommentGenerator:
                     rejected.append(
                         CommentCandidate(
                             text=text,
-                            generator=self.backend_name,
-                            generator_version=getattr(self._backend, "version", "1"),
+                            generator=backend_name,
+                            generator_version=backend_version,
                             quality_ok=False,
                             quality_reason=f"duplicate({duplicate.similarity:.2f})",
                             similarity_max=duplicate.similarity,
@@ -300,22 +293,12 @@ class CommentGenerator:
                 accepted.append(
                     CommentCandidate(
                         text=text,
-                        generator=self.backend_name,
-                        generator_version=getattr(self._backend, "version", "1"),
+                        generator=backend_name,
+                        generator_version=backend_version,
                         quality_ok=True,
                         similarity_max=duplicate.similarity,
                         status=DraftStatus.CANDIDATE,
                     )
                 )
                 if len(accepted) >= self.count:
-                    break
-
-        if not accepted:
-            logger.warning(
-                "media_id=%s 댓글 후보를 만들지 못했습니다(거절 %d건).",
-                media_row.get("media_id"),
-                len(rejected),
-            )
-        if accepted:
-            accepted[0].status = DraftStatus.SELECTED
-        return accepted + rejected
+                    return

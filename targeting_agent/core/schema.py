@@ -8,12 +8,14 @@
 - comment_drafts(media_pk, normalized_text) UNIQUE (동일 댓글 중복 저장 차단)
 - candidate_media.canonical_url UNIQUE (URL 입력 시 동일 게시물 중복 차단)
 
+v3(Phase 13): ai_analysis_cache 추가 — 동일 Candidate+Prompt+Model 재호출 차단.
+
 v2(Phase 12A): candidate_media에 canonical_url / instagram_media_id 추가,
 import_events 테이블 추가. 기존 DB는 core/database.py의 마이그레이션으로 보강된다.
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -173,6 +175,16 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         value INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (stat_date, metric)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ai_analysis_cache (
+        cache_key TEXT PRIMARY KEY,
+        model TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        media_pk INTEGER REFERENCES candidate_media(media_pk) ON DELETE SET NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
     )
     """,
     """
