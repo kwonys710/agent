@@ -145,6 +145,8 @@ class ScoreBreakdown:
     weights: dict[str, float] = field(default_factory=dict)
     total: float = 0.0
     notes: list[str] = field(default_factory=list)
+    # 어떤 Target Profile 버전으로 평가했는지(Phase 17)
+    profile_version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +154,7 @@ class ScoreBreakdown:
             "weights": self.weights,
             "total": self.total,
             "notes": self.notes,
+            "profile_version": self.profile_version,
         }
 
 

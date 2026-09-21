@@ -360,10 +360,33 @@ def _stats_tab(conn: sqlite3.Connection, config: Config) -> str:
         f"<table><tr><th>시각</th><th>Feedback</th><th>Creator</th><th>메모</th></tr>{recent}</table>"
         if recent else ""
     )
+    learning = queries.learning_overview(conn)
+    weights = ", ".join(
+        f"{k} {v:.2f}" for k, v in sorted(learning["weights"].items())
+    ) or "조정 없음"
+    changes = "".join(f"<li>{e(line)}</li>" for line in learning["changes"][:8]) or (
+        "<li class='muted'>변경 없음</li>"
+    )
+    learning_html = (
+        "<h2>Learning</h2>"
+        f'<div class="grid">'
+        f'<div class="stat">Profile<b>{e(learning["version"])}</b></div>'
+        f'<div class="stat">Feedback 표본<b>{e(learning["feedback_count"])}</b></div>'
+        f'<div class="stat">마지막 학습<b>{e((learning["last_run_at"] or "-")[:10])}</b></div>'
+        f'<div class="stat">상태<b>{e(learning["last_status"] or "-")}</b></div>'
+        "</div>"
+        f'<p class="muted">Topic 가중치: {e(weights)}</p>'
+        f"<ul>{changes}</ul>"
+        '<p class="muted">학습은 <code>run_targeting.bat --learn</code>(미리보기) / '
+        '<code>--learn-apply</code>(적용) / <code>--learning-rollback</code>(되돌리기)로 실행합니다. '
+        'Dashboard에서 자동으로 학습하지 않습니다.</p>'
+    )
+
     return (
         f'<h2>Feedback 누적</h2><div class="grid">{counts}</div>'
         f"<h2>최근 Feedback</h2>{table}"
         '<p class="muted">응답 있음 / 팔로우됨은 현재 수동 입력입니다(자동 감지는 Phase 16 범위).</p>'
+        f"{learning_html}"
     )
 
 

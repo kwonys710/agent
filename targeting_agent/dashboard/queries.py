@@ -210,6 +210,35 @@ def feedback_summary(conn: sqlite3.Connection, limit: int = 20) -> dict[str, Any
     return {"counts": counts, "recent": recent}
 
 
+def learning_overview(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Dashboard Learning 섹션용 요약(계산은 저장된 데이터만 사용)."""
+    from ..learning.profiles import get_active_profile
+
+    active = get_active_profile(conn)
+    last = conn.execute(
+        "SELECT started_at, feedback_count, changed_topics, status, dry_run, new_profile "
+        "FROM learning_runs ORDER BY learning_run_id DESC LIMIT 1"
+    ).fetchone()
+    feedback_count = int(
+        conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+    )
+    changes: list[str] = []
+    if last is not None and last["changed_topics"]:
+        try:
+            changes = [str(item) for item in json.loads(last["changed_topics"])]
+        except (json.JSONDecodeError, TypeError):
+            changes = []
+    return {
+        "version": active.version,
+        "weights": active.topic_weights,
+        "feedback_count": feedback_count,
+        "last_run_at": last["started_at"] if last else "",
+        "last_status": last["status"] if last else "",
+        "last_applied": bool(last and not last["dry_run"]),
+        "changes": changes,
+    }
+
+
 def analyzer_label(analyzer: Optional[str]) -> str:
     """분석 방식 표시용 라벨."""
     if analyzer == "claude_code":

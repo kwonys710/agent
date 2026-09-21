@@ -43,6 +43,7 @@ from .discovery.hashtag_discovery import HashtagDiscovery
 from .discovery.import_source import ImportDiscovery
 from .discovery.ingest import CandidateIngestor, ImportSummary
 from .learning.profile_optimizer import load_weights_override
+from .learning.profiles import get_active_profile
 
 logger = get_logger("pipeline")
 
@@ -114,7 +115,14 @@ class TargetingPipeline:
         self.analyzer = ContentAnalyzer(config, self.profile)
         # 학습으로 조정된 가중치가 있으면 그것을 사용한다(app_state.scoring_weights).
         self.weights_override = load_weights_override(conn)
-        self.scorer = TargetScorer(config, self.profile, self.weights_override)
+        active = get_active_profile(conn)
+        self.scorer = TargetScorer(
+            config,
+            self.profile,
+            self.weights_override,
+            topic_weights=active.topic_weights,
+            profile_version=active.version,
+        )
         self.comment_generator = CommentGenerator(config, self.profile, seed=seed)
         self.intelligence = ClaudeIntelligence(config, self.profile)
         self.tz_offset = int(config.get("actions.daily_limits.timezone_offset_hours", 9))
@@ -433,7 +441,14 @@ class CandidateProcessor:
         self.conn = conn
         self.profile = profile or load_profile(config.profile_path, conn)
         self.analyzer = ContentAnalyzer(config, self.profile)
-        self.scorer = TargetScorer(config, self.profile, load_weights_override(conn))
+        active = get_active_profile(conn)
+        self.scorer = TargetScorer(
+            config,
+            self.profile,
+            load_weights_override(conn),
+            topic_weights=active.topic_weights,
+            profile_version=active.version,
+        )
         self.comment_generator = CommentGenerator(config, self.profile, seed=seed)
         self.intelligence = intelligence or ClaudeIntelligence(config, self.profile)
 

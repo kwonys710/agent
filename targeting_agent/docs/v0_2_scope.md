@@ -179,8 +179,17 @@ ai:
 ## 7. 진행 순서 (확정)
 
 ```
-12A ✔ → 13 ✔ → 14 ✔ → 14.1 ✔ → 12B ✔ → 15 ✔ (지금까지 완료)
-  → Learning / 운영 안정화
+12A ✔ → 13 ✔ → 14 ✔ → 14.1 ✔ → 12B ✔ → 15 ✔ → 17 ✔ (완료)
+  → 운영 관찰 / v0.3 검토
+```
+
+v0.2 학습 Loop (Meta API 없이 동작):
+
+```
+Candidate Input(Dashboard URL / --add / inbox CSV)
+  → Claude Intelligence → Target Score → Dashboard Review
+  → Operator Feedback → Learning(--learn / --learn-apply)
+  → Target Profile 버전 갱신 → 다음 Candidate Scoring
 ```
 
 - Meta API(11A/11B)는 Optional이며 이 진행 순서를 막지 않는다.

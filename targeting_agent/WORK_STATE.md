@@ -102,7 +102,19 @@ Phase 15 완료: Scheduler + Daily Summary
 - Windows Task Scheduler helper: setup_scheduler.bat / scripts/install_scheduler.ps1
   (기본 Dry Run, -Install/-Uninstall, 공백·한글 경로 quoting 처리)
 
-Next: Learning / 운영 안정화
+Phase 17 완료: Learning & Operational Stabilization
+- learning/topics.py: Feedback·승인·Skip → topic 신호 → 결정론적 weight 조정
+  (표본 기준, 1회 변화 상한 0.05, 0.5~1.5 범위, 근거 문자열 포함)
+- learning/profiles.py: target_profiles 버전 관리(v1→v2…), rollback, 기존 버전 보존
+- learning/comment_stats.py: 선택/수정 댓글 지표(길이·이모지·수정량·유사도)
+- learning/metrics.py: 승인율·Score 구간별 승인율·Claude vs Heuristic·운영 상태·경고
+  + 임계값 추천(설정 자동 변경 없음)
+- scorer: topic weight를 content_similarity에만 적용, breakdown에 profile_version 기록
+- CLI: --learn(미리보기) / --learn-apply(새 버전 생성) / --learning-rollback
+- Dashboard Feedback/Stats 탭 + Daily Summary에 Learning 섹션
+- 학습 경로 Claude 호출 0, 과거 후보 점수 자동 재계산 없음
+
+Next: 운영 관찰 / v0.3 검토
 Meta API: Optional (진행을 막지 않음)
 
 Pending:

@@ -385,11 +385,34 @@ run_targeting.bat --feedback RESPONDED    --target @username       :: Creator
 ### 반영
 
 ```bat
-run_targeting.bat --learn         :: 제안만 확인
-run_targeting.bat --learn-apply   :: 반영(app_state에 override 저장)
-run_targeting.bat --rescore       :: 기존에 제외된 후보를 다시 평가 대상으로
-run_targeting.bat --learn-reset   :: 되돌리기
+run_targeting.bat --learn              :: 미리보기 — Profile을 바꾸지 않는다(Dry Run)
+run_targeting.bat --learn-apply        :: 적용 — 새 Profile 버전 생성
+run_targeting.bat --learning-rollback  :: 직전 Profile 버전으로 되돌리기
+run_targeting.bat --rescore            :: 기존에 제외된 후보를 다시 평가 대상으로
+run_targeting.bat --learn-reset        :: 키워드/가중치 override 초기화
 ```
+
+`--learn`은 **항상 미리보기**다. 적용은 `--learn-apply`에서만 일어난다.
+출력에는 Topic Weight 변경 예상, 운영 지표(검토 품질·댓글 선호·운영 상태), 임계값 추천이 함께 나온다.
+
+### Topic Weight 학습 (Phase 17)
+
+```
+Feedback / 승인 / Skip → topic별 신호 → 변화량 제한 → 새 Profile 버전 → 다음 후보 점수에 반영
+```
+
+- **ML 프레임워크를 쓰지 않는다.** 설명 가능한 결정론적 계산이며,
+  각 변경에 "GOOD_TARGET×2, APPROVED×1" 같은 근거가 함께 표시된다.
+- **학습 중 Claude 호출은 0이다.** 저장된 분석 결과와 Feedback만 사용한다.
+- 신호 강도·표본 기준·변화 상한은 `config.yaml`의 `learning:`에서 조정한다
+  (`minimum_feedback_count`, `minimum_topic_samples`, `max_delta_per_learning_run`,
+  `min_topic_weight`/`max_topic_weight`, `signals`).
+- 학습 결과는 기존 Profile을 덮어쓰지 않고 **새 버전(v1 → v2 …)** 으로 저장된다.
+  `--learning-rollback`으로 직전 버전으로 되돌릴 수 있고 이전 버전은 그대로 남는다.
+- Topic Weight는 **content_similarity 한 축에만** 곱해진다. 점수 공식과 나머지 구성요소는 그대로다.
+- 새 Profile은 **앞으로 들어오는 후보**에만 적용된다. 과거 후보 점수를 자동으로 다시 계산하지 않는다
+  (필요하면 `--rescore`). 평가에 쓰인 버전은 분석 결과의 `profile_version`에 남는다.
+- **Action 임계값(`minimum_target_score` 등)은 자동으로 바뀌지 않는다.** 추천만 출력한다.
 
 동작 규칙:
 

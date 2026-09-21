@@ -21,6 +21,7 @@ if __package__ in (None, ""):  # pragma: no cover - `python targeting_agent/main
 from .core.config import Config, load_config
 from .core.database import (
     get_connection,
+    utc_now,
     get_stats,
     init_db,
     reset_skipped_for_rescore,
@@ -40,6 +41,12 @@ from .core.models import FeedbackType
 from .discovery.ingest import CandidateIngestor, ImportSummary
 from .discovery.ingest import format_summary as format_import_summary
 from .learning.feedback import record_for_target, resolve_target
+from .learning.comment_stats import collect_comment_preference
+from .learning.metrics import collect_health_metrics, collect_quality_metrics, recommend_thresholds
+from .learning.profiles import SOURCE_LEARNING, get_active_profile
+from .learning.profiles import create_version as create_profile_version
+from .learning.profiles import rollback as rollback_profile
+from .learning.topics import STATUS_OK, format_plan, plan_learning
 from .learning.profile_optimizer import (
     apply_learning,
     format_suggestions,
@@ -111,9 +118,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--target", metavar="ID", default=None, help="Feedback 대상: Action ID | @username | media_id"
     )
     parser.add_argument("--note", default="", help="Feedback 메모")
-    parser.add_argument("--learn", action="store_true", help="Feedback 기반 조정 제안 출력")
+    parser.add_argument(
+        "--learn",
+        action="store_true",
+        help="Feedback 기반 조정 제안 출력(미리보기 전용 — Profile을 바꾸지 않는다)",
+    )
     parser.add_argument("--learn-apply", action="store_true", help="조정 제안을 실제로 반영")
     parser.add_argument("--learn-reset", action="store_true", help="학습 반영 내용 초기화")
+    parser.add_argument(
+        "--learning-rollback", action="store_true", help="직전 Target Profile 버전으로 되돌린다"
+    )
     parser.add_argument(
         "--rescore",
         action="store_true",
@@ -263,6 +277,58 @@ def run_feedback(config: Config, args: argparse.Namespace) -> int:
         conn.close()
 
 
+def _record_learning_run(conn, started, plan, previous_version, new_version, applied: bool) -> None:
+    """학습 이력을 남긴다(dry-run 포함)."""
+    import json as _json
+
+    conn.execute(
+        "INSERT INTO learning_runs (started_at, finished_at, feedback_count, previous_profile, "
+        "new_profile, changed_topics, status, dry_run) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            started,
+            utc_now(),
+            plan.feedback_count,
+            previous_version,
+            new_version,
+            _json.dumps([c.as_line() for c in plan.changes], ensure_ascii=False),
+            plan.status,
+            int(not applied),
+        ),
+    )
+    conn.commit()
+
+
+def format_operations_report(conn, config: Config) -> str:
+    """품질·운영 지표와 임계값 추천(설정은 바꾸지 않는다)."""
+    quality = collect_quality_metrics(conn)
+    health = collect_health_metrics(conn, config)
+    preference = collect_comment_preference(conn)
+
+    lines = ["운영 지표", "", "  [검토 품질]"]
+    lines += [f"    {k}: {v}" for k, v in quality.as_rows().items()]
+    lines += ["", "  [댓글 선호]"]
+    lines += [f"    {k}: {v}" for k, v in preference.as_rows().items()]
+    lines += ["", "  [운영 상태]"]
+    lines += [f"    {k}: {v}" for k, v in health.as_rows().items()]
+    for warning in health.warnings:
+        lines.append(f"    [경고] {warning}")
+    lines += ["", "  [임계값 추천]"]
+    lines += [f"    - {text}" for text in recommend_thresholds(config, quality)]
+    return "\n".join(lines)
+
+
+def run_learning_rollback(config: Config) -> int:
+    """직전 Profile 버전으로 되돌린다."""
+    conn = get_connection(config.db_path)
+    try:
+        init_db(conn)
+        ok, message = rollback_profile(conn)
+        print(message)
+        return 0 if ok else 1
+    finally:
+        conn.close()
+
+
 def run_learning(config: Config, args: argparse.Namespace) -> int:
     """--learn / --learn-apply / --learn-reset 처리."""
     conn = get_connection(config.db_path)
@@ -288,6 +354,11 @@ def run_learning(config: Config, args: argparse.Namespace) -> int:
         }
         weight_suggestion = suggest_weights(conn, current_weights, min_samples=min_samples)
 
+        # Phase 17: Topic Weight 학습(결정론적, Claude 호출 없음)
+        active = get_active_profile(conn)
+        plan = plan_learning(conn, config, active.topic_weights)
+        started = utc_now()
+
         applied = None
         if args.learn_apply:
             interval = int(config.get("learning.profile_update_interval_days", 0))
@@ -300,6 +371,28 @@ def run_learning(config: Config, args: argparse.Namespace) -> int:
             applied = apply_learning(conn, profile, profile_suggestion, weight_suggestion)
 
         print(format_suggestions(profile_suggestion, weight_suggestion, applied=applied))
+        print()
+        print(format_plan(plan, active.version))
+
+        new_version = None
+        if args.learn_apply and plan.status == STATUS_OK and plan.has_change:
+            created = create_profile_version(
+                conn,
+                plan.new_weights,
+                source=SOURCE_LEARNING,
+                reason=f"Feedback {plan.feedback_count}건 기반 자동 조정",
+                previous_version=active.version,
+            )
+            new_version = created.version
+            print(f"\n  → Profile {active.version} → {created.version} 적용 완료")
+        elif args.learn_apply:
+            print("\n  → 적용할 Topic Weight 변경이 없습니다.")
+        else:
+            print("\n  (적용하려면 --learn-apply, 되돌리려면 --learning-rollback)")
+
+        _record_learning_run(conn, started, plan, active.version, new_version, args.learn_apply)
+        print()
+        print(format_operations_report(conn, config))
         return 0
     finally:
         conn.close()
@@ -359,6 +452,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.feedback is not None:
         return run_feedback(config, args)
+
+    if args.learning_rollback:
+        return run_learning_rollback(config)
 
     if args.learn or args.learn_apply or args.learn_reset:
         return run_learning(config, args)

@@ -49,6 +49,7 @@ class SummaryData:
     feedback: dict[str, int] = field(default_factory=dict)
     inbox: dict[str, Any] = field(default_factory=dict)
     run: dict[str, Any] = field(default_factory=dict)
+    learning: dict[str, Any] = field(default_factory=dict)
 
 
 def _local_date(column: str, tz_offset: int) -> str:
@@ -134,8 +135,20 @@ def build_summary_data(
             "SELECT feedback_type, COUNT(*) AS n FROM feedback GROUP BY feedback_type"
         )
     }
+    from ..dashboard.queries import learning_overview
+
+    overview = learning_overview(conn)
+    learning = {
+        "Active Profile": overview["version"],
+        "Feedback 표본": overview["feedback_count"],
+        "마지막 학습": (overview["last_run_at"] or "-")[:19],
+        "상태": overview["last_status"] or "-",
+        "최근 변경": " / ".join(overview["changes"][:5]) or "변경 없음",
+    }
+
     return SummaryData(
         date=date,
+        learning=learning,
         candidate=candidate,
         ai=ai,
         score=score,
@@ -209,6 +222,10 @@ def render_summary_html(data: SummaryData) -> str:
 
 <h2>Inbox</h2>
 {rows(inbox)}
+
+<h2>Learning</h2>
+{rows(data.learning)}
+<p class="muted">학습은 자동 실행되지 않는다. 필요할 때 --learn 으로 확인한 뒤 --learn-apply 로 적용한다.</p>
 
 <h2>이번 실행</h2>
 {rows(run)}

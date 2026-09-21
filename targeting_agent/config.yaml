@@ -164,6 +164,28 @@ learning:
   min_feedback_samples: 10      # 이 수 미만이면 아무 것도 바꾸지 않는다
   min_keyword_occurrences: 3    # 키워드가 최소 몇 건의 Feedback에 등장해야 하는지
   min_keyword_media: 2          # 서로 다른 게시물 몇 개에서 반복돼야 하는지
+
+  # Topic Weight 학습(Phase 17) — 결정론적 계산, Claude를 호출하지 않는다.
+  minimum_feedback_count: 10    # 이 수 미만이면 Profile을 변경하지 않는다
+  minimum_topic_samples: 3      # topic별 최소 신호 수
+  max_delta_per_learning_run: 0.05   # 1회 학습에서 허용하는 최대 변화량
+  min_topic_weight: 0.5
+  max_topic_weight: 1.5
+  signals:                      # 신호 강도(양수=positive, 음수=negative)
+    GOOD_TARGET: 1.0
+    RESPONDED: 1.0
+    FOLLOWED: 1.0
+    NOT_MY_STYLE: -1.2
+    BAD_TARGET: -1.0
+    APPROVED: 0.5
+    SKIPPED: -0.3
+  health:                       # 운영 경고 기준(보고만 하고 설정을 바꾸지 않는다)
+    minimum_samples: 10
+    fallback_rate_warning: 0.30
+    candidate_error_warning: 0.10
+    cache_hit_minimum_warning: 0.20
+  threshold:
+    minimum_band_samples: 5     # Score 구간 추천에 필요한 최소 표본
   min_keyword_score: 2.0        # 키워드 신호 강도 임계값
 
 scheduler:

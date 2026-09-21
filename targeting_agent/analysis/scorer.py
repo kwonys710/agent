@@ -87,6 +87,8 @@ class TargetScorer:
         config: Config,
         profile: TargetProfile,
         weights_override: Optional[Mapping[str, float]] = None,
+        topic_weights: Optional[Mapping[str, float]] = None,
+        profile_version: str = "",
     ) -> None:
         self.config = config
         self.profile = profile
@@ -97,6 +99,9 @@ class TargetScorer:
             for k, v in base.items()
         }
         self.weights_source = "learned" if weights_override else "config"
+        # 학습된 topic 가중치. content_similarity 한 축에만 곱한다(점수 공식은 그대로).
+        self.topic_weights = {str(k): float(v) for k, v in (topic_weights or {}).items()}
+        self.profile_version = profile_version
         self.languages = [str(l) for l in config.list_of("discovery.languages")]
         self.min_followers = int(config.get("discovery.creator.min_followers", 0))
         self.max_followers = int(config.get("discovery.creator.max_followers", 10**9))
@@ -123,6 +128,13 @@ class TargetScorer:
                 self.profile.topics,
             )
             notes.append("similarity:heuristic")
+
+        topic_factor = self._topic_factor(analysis.topics)
+        if abs(topic_factor - 1.0) > 1e-9:
+            adjusted = max(0.0, min(1.0, content_similarity * topic_factor))
+            notes.append(f"topic_weight:{topic_factor:.2f}")
+            content_similarity = adjusted
+
         components = {
             "content_similarity": content_similarity,
             "creator_fit": creator_fit(
@@ -160,7 +172,17 @@ class TargetScorer:
             weights=dict(self.weights),
             total=score,
             notes=notes,
+            profile_version=self.profile_version,
         )
+
+    def _topic_factor(self, topics: Sequence[str]) -> float:
+        """후보 topic들의 학습 가중치 평균(없으면 1.0)."""
+        if not self.topic_weights or not topics:
+            return 1.0
+        matched = [self.topic_weights[t] for t in topics if t in self.topic_weights]
+        if not matched:
+            return 1.0
+        return sum(matched) / len(matched)
 
 
 def disqualify_reason(
