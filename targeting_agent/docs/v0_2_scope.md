@@ -1,6 +1,7 @@
 # Targeting Agent v0.2 범위 설계
 
 작성일: 2026-09-21 / 기준: v0.1(Phase 1~10) 완료 상태
+확정: 2026-09-21 (운영자 결정 반영 — Phase 분리, 진행 순서, Gemini 전략)
 
 ## 1. v0.1에서 실제로 확인된 병목
 
@@ -22,52 +23,87 @@
 
 우선순위 순. 각 Phase는 독립적으로 완료·릴리스 가능해야 한다.
 
-### Phase 11 — 내 반응자 기반 Discovery (최우선)
+### Phase 11A — Meta API Feasibility Spike (선행, 코드 최소)
 
-B1의 실질적 해법. 해시태그와 달리 **내 소유 미디어의 댓글 작성자는 username을 받을 수 있다**
-(본인 콘텐츠 범위라 권한 문제도 작다). 이미 내 콘텐츠에 관심을 보인 사람이므로 Target 품질도 높다.
+대규모 구현 전에 **실제 계정 + 실제 응답**으로 가능 여부를 확정한다.
+결과: `docs/phase11a_meta_api_spike.md`, Probe: `scripts/probe_meta_api.py`.
 
-- 새 Discovery 소스 `MyAudienceDiscovery`
-  - 내 미디어 목록 → 각 미디어의 댓글 작성자 수집 → Creator 후보화
-  - 해당 Creator의 최근 공개 게시물을 후보 media로 연결(가능한 범위 확인 필요)
+- 확인 대상: 내 Reel 댓글 조회 / comment `username` / `from{id,username}` /
+  Consumer 계정 댓글 작성자 식별 / Profile 추가 조회 / 필요한 permission / follower relationship
+- **"Public Content Access가 필요할 것"이라고 미리 가정하지 않는다.** 실제 사용할 endpoint와
+  permission을 확인한 뒤 App Review 필요 여부를 판단한다.
+- 판정: GO / LIMITED GO / NO-GO
+- 현재 상태: **LIMITED GO(잠정)** — 문서 기준 검증 완료, 실계정 Probe 1회 실행 후 확정
+
+### Phase 11B — Commenter Discovery (11A가 GO/LIMITED GO일 때만)
+
+11A 결과에 따라 범위를 정한다. **Discovery와 Enrichment를 분리한다.**
+
+```
+내 Reel → Comments → Commenter 식별(username/IGSID) → Candidate 생성   (필수)
+                                                        ↓
+                                      Creator Profile Enrichment       (선택)
+                                        ├ 가능 → followers/media_count 보강
+                                        └ 불가 → 최소 정보만 저장, creator_fit 중립값
+```
+
+- username까지만 얻고 Profile 조회가 안 되는 경우도 **실패로 처리하지 않는다.**
 - `discovery.default_source: my_audience` 추가, 기존 Import/Hashtag와 공존
-- **사전 확인 필요(공식 문서)**: 댓글 작성자 필드(`from{id,username}`) 제공 여부와 권한,
-  타 계정 미디어 조회 가능 범위, oEmbed로 permalink→작성자 해석 가능 여부
+- 완료 기준: `unresolved:` 후보가 생기지 않고 Action Queue까지 이어진다
 
-완료 기준: 토큰만 넣으면 Creator가 식별된 후보가 DB에 쌓이고, 그대로 Action Queue까지 간다
-(`unresolved:` 후보가 생기지 않는다).
+### Phase 12A — Candidate Input Fallback (기본 입력 경로)
 
-### Phase 12 — 후보 입력 보강
+11A 결과와 무관하게 **먼저 만든다.** 11A가 NO-GO면 이것이 유일한 입력 경로가 된다.
 
-Phase 11이 권한 문제로 막혀도 B1을 완화하는 안전망.
-
-- `--add <permalink> [--username <name>]`: 링크 하나를 바로 후보로 추가하는 CLI
-- permalink만 주어졌을 때 username 해석 경로(공식 oEmbed 사용 가능 여부 확인 후 결정,
-  불가하면 운영자 입력 요구 — 스크래핑은 하지 않는다)
-- Import 파일 감시: `data/inbox/*.csv`를 실행 시 자동으로 읽고 처리 후 `data/inbox/done/`으로 이동
+- `--add <Instagram Reel URL> [--username <name>]` : 링크 단건 등록
+- `data/inbox/*.csv` 자동 처리 → 완료분은 `data/inbox/done/`으로 이동
+- permalink만 있을 때 username 해석 경로는 **공식 수단이 확인될 때만** 사용한다.
+  확인 안 되면 운영자 입력을 요구한다 — 스크래핑·비공식 endpoint는 사용하지 않는다.
 
 완료 기준: 휴대폰에서 본 릴스를 링크 복사 → 한 줄 명령으로 후보 등록.
 
-### Phase 13 — AI 분석·댓글 실사용 검증 (B3)
+### Phase 12B — Candidate Input UX 보강 (후순위)
 
-- `GEMINI_API_KEY` 실제 연결 상태에서 분석/댓글 경로 검증(현재는 코드 경로만 존재)
-- 프롬프트 파일화(`prompts/analysis_v2.txt`, `prompts/comment_v2.txt`) + 버전 관리
-  → 프롬프트 변경 시 `prompt_version`이 바뀌어 캐시가 무효화되는 흐름 유지
-- **비용 가드**: `analysis.max_api_calls_per_run`, `analysis.max_api_calls_per_day`,
-  캐시 적중률 로깅, 한도 도달 시 heuristic으로 자동 강등
-- 댓글은 Gemini 우선 / 실패·한도 시 템플릿 fallback (이미 있는 구조 활용)
+일괄 등록, 중복 안내, 입력 이력 확인 등. 12A 운영 경험 후 착수.
 
-완료 기준: 같은 후보를 두 번 돌려도 API 호출이 한 번만 나가고, 한도 초과 시 중단이 아니라 강등된다.
+### Phase 13 — AI 분석·댓글 실사용 (Gemini, Free Tier부터)
 
-### Phase 14 — Dashboard에서 처리 (B2)
+- **Paid Tier를 전제하지 않는다.** Free Tier로 실호출 검증 → 사용량·Rate Limit 측정 → 필요 시 유료 전환
+- API Key가 없으면 Adapter / Prompt / Cache / Fallback까지 구현해두고, Key 입력 즉시 테스트 가능하게 한다
+- 프롬프트 파일화(`prompts/*.txt`) + `prompt_version` 관리 → 변경 시에만 캐시 무효화
+- 인증 방식은 **작업 시점의 Gemini 공식 문서와 google-genai SDK를 확인한 뒤** 구현한다
+  (기존 standard key 방식을 그대로 가정하지 않는다). Key는 `.env`/환경변수에서만 읽는다.
 
-- 읽기 전용 → 로컬 조작 가능(127.0.0.1 바인딩 유지, 외부 노출 없음)
-- 확인 대기 목록에서 버튼으로 `confirm` / `skip`
-- 후보/Action 행에서 Feedback(GOOD_TARGET / NOT_MY_STYLE 등) 클릭 입력
-- 댓글 후보 3개 중 선택 변경
-- CSRF/오조작 방지를 위해 POST + 토큰(로컬 세션 한정), 외부 바인딩 시 실행 거부
+Cost Guard (`config.yaml`):
 
-완료 기준: 목록 확인 → 처리 → 피드백까지 브라우저 한 화면에서 끝난다.
+```yaml
+ai:
+  provider: gemini
+  daily_request_limit: 50
+  max_candidates_per_ai_batch: 20
+  use_cache: true
+  fallback_to_heuristic: true
+  stop_on_budget_limit: true
+```
+
+재호출 조건 — 아래가 아니면 **항상 캐시/DB를 쓴다**
+(Content Analysis, Profile Analysis, Comment Draft, Embedding, Similarity, AI Classification 공통):
+
+- source 변경 / `prompt_version` 변경 / model 변경 / 이전 분석 실패 / 사용자가 `--reanalyze` 명시
+
+Rate Limit 처리: `429` 또는 `RESOURCE_EXHAUSTED` → **로그 기록 → heuristic fallback → 파이프라인 계속**.
+무한 재시도 금지, 동일 요청 반복 호출 금지, 프로그램 전체 실패 금지.
+
+### Phase 14 — Dashboard Action UI
+
+읽기 전용 → 처리 가능. Candidate Card 단위로 보여준다.
+
+- 카드 내용: username / target score / 선정 이유 / caption / 생성된 댓글 후보
+- Action: `[승인]` `[Skip]` `[댓글 선택]` `[좋은 Target]` `[관심 없음]`
+- Feedback: `[응답 있음]` `[팔로우됨]` `[좋은 댓글]` `[나쁜 댓글]`
+- 클릭 결과는 즉시 SQLite에 기록(기존 confirm/feedback 경로 재사용)
+- **127.0.0.1에서만 실행한다.** `0.0.0.0` 등 외부 인터페이스 바인딩이 감지되면 실행을 거부한다.
+- 오조작 대비: POST + 로컬 세션 토큰, 되돌리기(`--skip`, `--learn-reset`) 유지
 
 ### Phase 15 — 스케줄 실행과 요약 리포트 (B5)
 
@@ -77,16 +113,21 @@ Phase 11이 권한 문제로 막혀도 B1을 완화하는 안전망.
 
 완료 기준: 사람이 명령을 치지 않아도 매일 후보가 쌓이고, 아침에 요약 하나만 보면 된다.
 
-### Phase 16 — 결과 자동 추적으로 학습 루프 닫기 (B4)
+### Phase 16A — Response Tracking (우선)
 
-- Interaction 이후 N일 안에
-  - 해당 Creator가 내 계정을 팔로우했는지
-  - 내 게시물에 댓글/답글을 남겼는지
-  를 공식 API 범위에서 주기적으로 확인 → `FOLLOWED` / `RESPONDED` Feedback 자동 기록
-- 추적 결과를 `--learn` 제안에 반영(Phase 10 구조 그대로 사용)
-- **사전 확인 필요**: 팔로워 목록 조회 가능 범위. 불가하면 "내 미디어 댓글 작성자"만으로 대체.
+공식 API로 확인 가능한 범위의 반응을 감지한다.
 
-완료 기준: 운영자가 Feedback을 직접 입력하지 않아도 학습 표본이 쌓인다.
+- 내 콘텐츠에 달린 새 댓글 / Reply / 기타 확인 가능한 Response
+- 감지되면 `RESPONDED` Feedback 자동 기록 + `response_detected_at`, `response_type` 저장
+- 추적 주기·대상 수 상한(`tracking.*`), 실패 시 지수 백오프
+
+### Phase 16B — Follow-back Detection (조건부)
+
+**Phase 11A 확인 결과: 공식 API에 팔로워 관계 확인 endpoint가 없다.**
+따라서 자동 감지는 구현하지 않고 Dashboard 수동 Feedback으로 유지한다.
+(`[팔로우됨]` `[응답 있음]` `[관심 없음]` 버튼 → feedback DB → 학습 반영)
+
+비공식 follower API는 사용하지 않는다. 공식 지원이 생기면 그때 자동화를 재검토한다.
 
 ## 4. v0.2에서 하지 않는 것 (Non-goals)
 
@@ -94,21 +135,24 @@ Phase 11이 권한 문제로 막혀도 B1을 완화하는 안전망.
 - 팔로우/언팔로우 자동화, DM 자동 발송
 - 다계정 운영, 클라우드 배포, 팀 기능
 - 영상 다운로드 기반 시각 분석(비용·저작권·정책 리스크 대비 이득이 불명확)
-- 형태소 분석기 도입 — Phase 13(AI 분석)으로 해결되면 불필요. 필요해지면 그때 재검토.
+- 형태소 분석기 등 대형 Dependency — Phase 13(AI 분석)으로 해결되면 불필요
+- 비공식 Instagram API / 탐지·CAPTCHA·Rate Limit 우회
+- 팔로우 자동화, DM 자동 발송
 
-## 5. 선행 확인 항목 (코드 작성 전)
+## 5. 선행 확인 결과 (Phase 11A)
 
-아래는 **공식 문서로 직접 확인한 뒤** 설계를 확정해야 한다.
-(v0.1 작업 환경에서는 `developers.facebook.com` 접근이 차단되어 검색 결과로만 확인했다.)
+상세: `docs/phase11a_meta_api_spike.md`
 
-1. 내 미디어 댓글 작성자 필드(`from{id,username}`) 제공 여부와 필요한 권한 → Phase 11
-2. 타 계정(공개 Business/Creator) 미디어·프로필 조회 가능 범위 → Phase 11
-3. Instagram oEmbed로 permalink → 작성자 해석 가능 여부와 권한 → Phase 12
-4. 팔로워/팔로우 관계 조회 가능 여부 → Phase 16
-5. 앱 심사(Public Content Access) 필요 범위와 소요 기간 → Phase 11·16 일정 전제
+| 항목 | 문서 기준 결과 | 영향 |
+| --- | --- | --- |
+| 내 미디어 댓글 + `username`/`from{id,username}` | PASS (실측 대기) | Phase 11B 성립 |
+| Consumer 댓글 작성자 식별 | LIMITED (실측 1순위) | 누락분은 후보에서 제외 |
+| Profile Enrichment(`business_discovery`) | LIMITED — Facebook Login 전용 + 대상이 Professional일 때만 | Discovery와 분리 |
+| App Review | **불필요(내 계정 범위)** — Standard Access로 충분 | 심사 전제 철회 |
+| permission | IG Login: `instagram_business_basic`+`instagram_business_manage_comments` / FB Login: `instagram_basic`+`instagram_manage_comments`+`pages_read_engagement` | 기존 토큰 구조 유지 |
+| follower relationship | 미지원 | Phase 16B 수동 유지 |
 
-확인 결과 불가로 나오면 해당 Phase는 **범위를 줄이거나 Non-goal로 내린다.**
-v0.1에서처럼 "가능하다고 가정한 코드"는 쓰지 않는다.
+실측 Probe를 1회 실행해 판정을 확정하기 전까지 **Phase 11B 본 구현은 시작하지 않는다.**
 
 ## 6. 데이터·설정 변경 예상
 
@@ -119,15 +163,22 @@ v0.1에서처럼 "가능하다고 가정한 코드"는 쓰지 않는다.
 | `config.yaml` | `discovery.my_audience.*`, `analysis.max_api_calls_per_*`, `dashboard.allow_actions`, `schedule.*`, `tracking.*` |
 | 마이그레이션 | 스키마 버전(`app_state.schema_version`) 기반 단계적 ALTER — 기존 DB를 지우지 않는다 |
 
-## 7. 진행 순서 제안
+## 7. 진행 순서 (확정)
 
 ```
-11 (Discovery) → 13 (AI 품질) → 14 (Dashboard) → 16 (자동 추적) → 15 (스케줄) → 12 (입력 보강, 필요 시)
+11A (Feasibility Spike)
+  → 12A (Candidate Input Fallback 기본 확보)
+  → 13  (Gemini 실사용 + Prompt Version + Cache + Heuristic fallback)
+  → 14  (Dashboard Action UI)
+  → 11B (11A가 GO/LIMITED GO일 때만 Commenter Discovery 구현)
+  → 16A (Response Tracking)
+  → 16B (Follow-back: 공식 지원 여부에 따라 자동 또는 수동)
+  → 15  (Schedule + Daily Summary HTML)
+  → 12B (Candidate Input UX 보강)
 ```
 
-- 11이 막히면 12를 먼저 올려 후보 공급을 유지한다.
-- 13은 API Key만 있으면 다른 Phase와 병행 가능하다.
-- 15는 마지막이 적절하다. 자동 실행은 나머지가 안정된 뒤에 켜는 게 안전하다.
+- **11A가 NO-GO여도 v0.2 개발은 멈추지 않는다.** 12A가 입력 경로를 맡고 11B만 드롭된다.
+- 13은 API Key 유무와 무관하게 착수 가능(Key 없으면 Adapter/Fallback까지 구현).
 
 ## 8. 릴리스 기준 (v0.2 Definition of Done)
 

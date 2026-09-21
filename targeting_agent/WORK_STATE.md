@@ -34,11 +34,18 @@ Completed:
 Last Test:
 python -m pytest targeting_agent/tests -q  → 101 passed
 
-Next:
-- v0.2 범위 설계 완료 → docs/v0_2_scope.md
-  Phase 11(내 반응자 Discovery) → 13(AI 품질) → 14(Dashboard 조작)
-  → 16(결과 자동 추적) → 15(스케줄) → 12(입력 보강)
-  선행: 공식 문서로 댓글 작성자 필드/oEmbed/팔로워 조회 가능 여부 확인
+Next (v0.2 확정 — docs/v0_2_scope.md):
+순서: 11A → 12A → 13 → 14 → 11B → 16A → 16B → 15 → 12B
+
+Phase 11A 완료(문서 기준): docs/phase11a_meta_api_spike.md, scripts/probe_meta_api.py
+- 판정: LIMITED GO(잠정) — 실계정 Probe 1회 실행 후 확정
+- App Review는 전제에서 제외(내 계정 범위면 Standard Access로 충분)
+- Profile Enrichment는 business_discovery(FB Login + Professional 대상)로 제한
+  → Commenter Discovery와 분리
+- follower relationship은 공식 미지원 → Phase 16B는 수동 Feedback 유지
+- 실측 1순위: Consumer 계정 댓글 작성자의 from/username 반환 여부
+
+차단: 실계정 Probe 결과 확정 전까지 Phase 11B 본 구현 시작 금지
 
 Pending:
 - 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)
