@@ -37,6 +37,8 @@ from .analysis.profile_analyzer import load_profile
 from .core.exceptions import TargetingError
 from .core.logger import get_logger, setup_logging
 from .core.models import FeedbackType
+from .discovery.ingest import CandidateIngestor, ImportSummary
+from .discovery.ingest import format_summary as format_import_summary
 from .learning.feedback import record_for_target, resolve_target
 from .learning.profile_optimizer import (
     apply_learning,
@@ -68,6 +70,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-dry-run", dest="dry_run", action="store_false", help="실제 실행(주의)"
     )
     parser.set_defaults(dry_run=None)
+    parser.add_argument(
+        "--add",
+        action="append",
+        metavar="URL",
+        default=None,
+        help="Instagram 게시물 URL을 후보로 등록(여러 번 지정 가능)",
+    )
+    parser.add_argument("--username", default=None, help="--add 시 Creator username(선택)")
+    parser.add_argument("--caption", default="", help="--add 시 캡션 직접 입력(선택)")
+    parser.add_argument(
+        "--import-only",
+        action="store_true",
+        help="후보 입력(inbox 포함)만 수행하고 분석/실행은 하지 않는다",
+    )
     parser.add_argument("--stats", action="store_true", help="DB 현황만 출력하고 종료")
     parser.add_argument(
         "--list-pending", action="store_true", help="운영자 확인 대기 Action 목록 출력"
@@ -168,6 +184,55 @@ def run_confirmation(config: Config, args: argparse.Namespace) -> int:
         conn.close()
 
 
+def run_add(config: Config, args: argparse.Namespace) -> int:
+    """--add URL [--username X] [--caption ...] 처리."""
+    conn = get_connection(config.db_path)
+    try:
+        init_db(conn)
+        ingestor = CandidateIngestor(conn)
+        urls = [str(url) for url in args.add]
+        if args.caption and len(urls) == 1:
+            # 캡션은 단건 입력일 때만 반영한다(여러 URL에 같은 캡션을 붙이지 않는다).
+            summary = ImportSummary()
+            ingestor.add_url(
+                urls[0],
+                username=args.username,
+                caption=args.caption,
+                note=args.note,
+                summary=summary,
+            )
+        else:
+            summary = ingestor.add_urls(urls, username=args.username, note=args.note)
+        print(format_import_summary(summary))
+        return 0 if summary.added or summary.duplicate else 1
+    finally:
+        conn.close()
+
+
+def run_import_only(config: Config, args: argparse.Namespace) -> int:
+    """inbox CSV만 처리하고 분석/실행은 하지 않는다."""
+    conn = get_connection(config.db_path)
+    try:
+        init_db(conn)
+        inbox = config._resolve_path(config.get("discovery.inbox.path", "data/inbox"))
+        summary = CandidateIngestor(conn).process_inbox(
+            inbox,
+            processed_dir=config._resolve_path(
+                config.get("discovery.inbox.processed_dir", "data/inbox/processed")
+            ),
+            failed_dir=config._resolve_path(
+                config.get("discovery.inbox.failed_dir", "data/inbox/failed")
+            ),
+        )
+        if not summary.has_input:
+            print(f"처리할 입력이 없습니다: {inbox}")
+            return 0
+        print(format_import_summary(summary))
+        return 0
+    finally:
+        conn.close()
+
+
 def run_feedback(config: Config, args: argparse.Namespace) -> int:
     """--feedback TYPE --target ID 처리."""
     try:
@@ -259,6 +324,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         serve(config)
         return 0
+
+    if args.add:
+        return run_add(config, args)
+
+    if args.import_only:
+        return run_import_only(config, args)
 
     if args.rescore:
         conn = get_connection(config.db_path)

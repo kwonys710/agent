@@ -45,6 +45,14 @@ Phase 11A 완료(문서 기준): docs/phase11a_meta_api_spike.md, scripts/probe_
 - follower relationship은 공식 미지원 → Phase 16B는 수동 Feedback 유지
 - 실측 1순위: Consumer 계정 댓글 작성자의 from/username 반환 여부
 
+Phase 12A 완료: Candidate Input Fallback
+- CLI `--add <URL>`(다건 가능), `--import-only`
+- `data/inbox/*.csv` 자동 처리 → processed/ 또는 failed/ 로 이동(삭제하지 않음)
+- URL 검증·정규화(쿼리 제거, /reels/→/reel/), 중복 우선순위: instagram_media_id → canonical_url
+- 부분정보 후보는 NEEDS_ENRICHMENT 상태로 저장(파이프라인을 막지 않음)
+- import_events 테이블에 입력 이력 기록(ADDED/DUPLICATE/INVALID/ERROR)
+- schema v2 마이그레이션: 기존 DB에 canonical_url/instagram_media_id 컬럼만 추가
+
 차단: 실계정 Probe 결과 확정 전까지 Phase 11B 본 구현 시작 금지
 
 Pending:

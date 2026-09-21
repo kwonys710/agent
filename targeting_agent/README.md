@@ -35,6 +35,8 @@ run_targeting.bat
 | --- | --- |
 | `run_targeting.bat` | config.yaml 기준 실행(기본 Dry Run) |
 | `run_targeting.bat --import my_list.csv` | 후보 파일 지정 |
+| `run_targeting.bat --add "<Instagram URL>"` | 링크 한 건을 후보로 등록(여러 번 지정 가능) |
+| `run_targeting.bat --import-only` | 후보 입력(inbox 포함)만 하고 분석·실행은 건너뜀 |
 | `run_targeting.bat --limit 5` | 이번 실행 최대 Action 수 |
 | `run_targeting.bat --stats` | 현재 DB 현황만 출력 |
 | `run_targeting.bat --dashboard` | 로컬 Dashboard(http://127.0.0.1:8501) |
@@ -70,6 +72,39 @@ SAMPLE001,https://www.instagram.com/reel/SAMPLE001/,office_daily_kim,오늘도 �
 - `media_id`가 없으면 `permalink`의 shortcode를 사용한다.
 - `.txt` 파일은 permalink만 한 줄씩 넣어도 된다.
 - Excel에서 저장한 CSV(UTF-8 BOM)도 그대로 읽는다.
+
+### 3-1. 링크로 바로 등록 (Phase 12A)
+
+```bat
+run_targeting.bat --add "https://www.instagram.com/reel/ABC123/"
+run_targeting.bat --add "URL1" --add "URL2"
+run_targeting.bat --add "URL" --username creator_a --caption "퇴근길 #직장인"
+```
+
+- `?utm_source=...` 같은 쿼리는 제거하고 `https://www.instagram.com/reel/<code>/` 형태로 저장한다
+  → 같은 게시물이 중복 등록되지 않는다.
+- **URL에 없는 정보(username, caption, 팔로워 수)는 추측하지 않는다.** 모르면 비워 두고
+  상태를 `NEEDS_ENRICHMENT`로 남긴다. 이후 보강되면 분석 대상이 된다.
+- `--username`, `--caption`을 주면 바로 분석 가능한 `NEW` 상태로 저장된다.
+
+### 3-2. Inbox CSV 자동 처리 (Phase 12A)
+
+`targeting_agent/data/inbox/*.csv`를 실행할 때 자동으로 읽는다.
+
+```csv
+url,username,note
+https://www.instagram.com/reel/AAA/,,링크만 있어도 된다
+https://www.instagram.com/reel/BBB/,creator_a,퇴근 브이로그
+```
+
+- 필수 컬럼 `url` (`permalink`/`link`도 인식), 선택 컬럼 `username` `note` `caption` `source`
+- UTF-8 / UTF-8 BOM(Excel) / CP949 인코딩을 모두 읽는다
+- **원본 파일을 삭제하지 않는다.** 처리 후 `data/inbox/processed/`로 옮기고,
+  파일 자체를 읽을 수 없으면 `data/inbox/failed/`로 옮긴다
+- 한 행이 잘못돼도 나머지는 처리하고, 실패 내역은 `<파일명>_report.md`로 남긴다
+- 결과는 `ADDED / DUPLICATE / INVALID / ERROR`로 집계되어 `import_events` 테이블에 기록된다
+
+> Phase 12A는 **후보 입력만** 담당한다. Instagram 페이지 접근·로그인·스크래핑은 하지 않는다.
 
 ## 4. 파이프라인
 

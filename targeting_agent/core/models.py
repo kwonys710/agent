@@ -11,6 +11,8 @@ from typing import Any, Mapping, Optional
 
 class MediaStatus(str, Enum):
     NEW = "NEW"
+    # 입력은 됐지만 분석에 필요한 정보(caption/hashtag)가 없어 보강이 필요한 상태(Phase 12A)
+    NEEDS_ENRICHMENT = "NEEDS_ENRICHMENT"
     ANALYZED = "ANALYZED"
     SCORED = "SCORED"
     QUEUED = "QUEUED"
@@ -71,6 +73,10 @@ class RawCandidate:
     is_private: bool = False
     is_ad: bool = False
     source: str = "import"
+    # Phase 12A: URL 입력 경로에서 사용. 모르는 값은 추측하지 않고 None으로 둔다.
+    canonical_url: Optional[str] = None
+    instagram_media_id: Optional[str] = None
+    note: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
 

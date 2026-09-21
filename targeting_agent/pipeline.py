@@ -40,6 +40,7 @@ from .core.models import DraftStatus, MediaStatus, RawCandidate
 from .discovery.base import dedupe_candidates, filter_by_config
 from .discovery.hashtag_discovery import HashtagDiscovery
 from .discovery.import_source import ImportDiscovery
+from .discovery.ingest import CandidateIngestor, ImportSummary
 from .learning.profile_optimizer import load_weights_override
 
 logger = get_logger("pipeline")
@@ -86,6 +87,7 @@ class RunSummary:
     execution: ExecutionSummary = field(default_factory=ExecutionSummary)
     limits: dict[str, tuple[int, int]] = field(default_factory=dict)
     export_path: Optional[str] = None
+    ingest: Optional[ImportSummary] = None
     profile_source: str = "file"
     weights_source: str = "config"
 
@@ -123,6 +125,27 @@ class TargetingPipeline:
         )
 
     # --- Phase 2: Discovery ---------------------------------------------
+    def ingest_inbox(self) -> Optional[ImportSummary]:
+        """data/inbox/*.csv 를 후보로 등록한다(Phase 12A)."""
+        if not bool(self.config.get("discovery.inbox.enabled", True)):
+            return None
+        inbox = self.config._resolve_path(self.config.get("discovery.inbox.path", "data/inbox"))
+        summary = CandidateIngestor(self.conn).process_inbox(
+            inbox,
+            processed_dir=self.config._resolve_path(
+                self.config.get("discovery.inbox.processed_dir", "data/inbox/processed")
+            ),
+            failed_dir=self.config._resolve_path(
+                self.config.get("discovery.inbox.failed_dir", "data/inbox/failed")
+            ),
+        )
+        if summary.has_input:
+            self.summary.ingest = summary
+            self.summary.discovery.found += summary.input_count
+            self.summary.discovery.new += summary.added
+            self.summary.discovery.duplicate += summary.duplicate
+        return summary
+
     def discover(self, source_path: Optional[Path | str] = None) -> DiscoveryStats:
         stats = self.summary.discovery
         if not bool(self.config.get("discovery.enabled", True)):
@@ -333,6 +356,7 @@ class TargetingPipeline:
 
     # --- 전체 실행 --------------------------------------------------------
     def run(self, source_path: Optional[Path | str] = None) -> RunSummary:
+        self.ingest_inbox()
         self.discover(source_path)
         self.analyze_and_score()
         self.execute()
@@ -372,6 +396,18 @@ def format_summary(summary: RunSummary, config: Config) -> str:
         f"   Duplicate : {summary.discovery.duplicate}",
         f"   Filtered  : {summary.discovery.filtered}",
         f"   New       : {summary.discovery.new}",
+    ]
+    if summary.ingest and summary.ingest.has_input:
+        ingest = summary.ingest
+        lines += [
+            "",
+            " Inbox 입력",
+            f"   Added     : {ingest.added}",
+            f"   Duplicate : {ingest.duplicate}",
+            f"   Invalid   : {ingest.invalid}",
+            f"   Error     : {ingest.error}",
+        ]
+    lines += [
         "",
         " Analysis",
         f"   Analyzed       : {summary.analysis.analyzed} (cache {summary.analysis.cached})",

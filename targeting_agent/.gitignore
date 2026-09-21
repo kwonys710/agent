@@ -8,3 +8,9 @@ data/cache/
 .env
 __pycache__/
 *.pyc
+
+# Inbox 입력 파일(실제 데이터)
+data/inbox/*.csv
+data/inbox/*_report.md
+data/inbox/processed/
+data/inbox/failed/

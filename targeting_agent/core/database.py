@@ -50,8 +50,27 @@ def get_connection(db_path: Union[Path, str]) -> sqlite3.Connection:
     return conn
 
 
+NEW_COLUMNS_V2 = (
+    ("candidate_media", "canonical_url", "TEXT"),
+    ("candidate_media", "instagram_media_id", "TEXT"),
+)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """기존 DB를 지우지 않고 필요한 컬럼만 덧붙인다(Phase 12A: schema v2)."""
+    for table, column, column_type in NEW_COLUMNS_V2:
+        existing = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if not existing:  # 테이블 자체가 없으면 CREATE가 처리한다
+            continue
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     """스키마를 생성하고 schema_version을 기록한다."""
+    _apply_migrations(conn)
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
     conn.execute(
@@ -116,22 +135,53 @@ def upsert_creator(conn: sqlite3.Connection, candidate: RawCandidate) -> int:
     return int(row["creator_id"])
 
 
-def insert_candidate(conn: sqlite3.Connection, candidate: RawCandidate) -> Optional[int]:
-    """새 후보를 저장한다. 이미 존재하는 media_id면 None을 반환한다(중복 차단)."""
+def find_candidate(conn: sqlite3.Connection, candidate: RawCandidate) -> Optional[int]:
+    """이미 저장된 후보인지 확인한다.
+
+    식별 우선순위: instagram_media_id → canonical_url → media_id
+    (URL만 입력된 후보는 Instagram media_id를 알 수 없으므로 canonical_url이 키가 된다.)
+    """
+    checks = (
+        ("instagram_media_id", candidate.instagram_media_id),
+        ("canonical_url", candidate.canonical_url),
+        ("media_id", candidate.media_id),
+    )
+    for column, value in checks:
+        if not value:
+            continue
+        row = conn.execute(
+            f"SELECT media_pk FROM candidate_media WHERE {column} = ?", (value,)
+        ).fetchone()
+        if row:
+            return int(row["media_pk"])
+    return None
+
+
+def insert_candidate(
+    conn: sqlite3.Connection,
+    candidate: RawCandidate,
+    status: MediaStatus = MediaStatus.NEW,
+) -> Optional[int]:
+    """새 후보를 저장한다. 이미 존재하는 후보면 None을 반환한다(중복 차단)."""
+    if find_candidate(conn, candidate) is not None:
+        return None
     creator_id = upsert_creator(conn, candidate)
     now = utc_now()
     cursor = conn.execute(
         """
         INSERT OR IGNORE INTO candidate_media (
-            media_id, creator_id, permalink, media_type, caption, hashtags,
+            media_id, creator_id, permalink, canonical_url, instagram_media_id,
+            media_type, caption, hashtags,
             like_count, comment_count, posted_at, language, is_ad, source,
             status, discovered_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             candidate.media_id,
             creator_id,
             candidate.permalink,
+            candidate.canonical_url,
+            candidate.instagram_media_id,
             candidate.media_type,
             candidate.caption,
             json.dumps(candidate.hashtags, ensure_ascii=False),
@@ -141,13 +191,45 @@ def insert_candidate(conn: sqlite3.Connection, candidate: RawCandidate) -> Optio
             candidate.language,
             int(candidate.is_ad),
             candidate.source,
-            MediaStatus.NEW.value,
+            status.value,
             now,
             now,
         ),
     )
     if cursor.rowcount == 0:
         return None
+    return int(cursor.lastrowid)
+
+
+def record_import_event(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    result: str,
+    original_url: str = "",
+    canonical_url: Optional[str] = None,
+    media_pk: Optional[int] = None,
+    source_file: Optional[str] = None,
+    source_row: Optional[int] = None,
+    error_message: Optional[str] = None,
+) -> int:
+    """입력 1건의 처리 결과를 남긴다(ADDED/DUPLICATE/INVALID/ERROR)."""
+    cursor = conn.execute(
+        "INSERT INTO import_events (media_pk, source, source_file, source_row, "
+        "original_url, canonical_url, result, error_message, imported_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            media_pk,
+            source,
+            source_file,
+            source_row,
+            original_url,
+            canonical_url,
+            result,
+            error_message,
+            utc_now(),
+        ),
+    )
     return int(cursor.lastrowid)
 
 

@@ -6,10 +6,14 @@
 - interactions(media_pk, action_type, dry_run) UNIQUE (동일 media 중복 Interaction 차단)
 - action_queue(media_pk, action_type) UNIQUE (동일 Action 중복 적재 차단)
 - comment_drafts(media_pk, normalized_text) UNIQUE (동일 댓글 중복 저장 차단)
+- candidate_media.canonical_url UNIQUE (URL 입력 시 동일 게시물 중복 차단)
+
+v2(Phase 12A): candidate_media에 canonical_url / instagram_media_id 추가,
+import_events 테이블 추가. 기존 DB는 core/database.py의 마이그레이션으로 보강된다.
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -34,6 +38,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         media_id TEXT NOT NULL UNIQUE,
         creator_id INTEGER NOT NULL REFERENCES creators(creator_id) ON DELETE CASCADE,
         permalink TEXT NOT NULL,
+        canonical_url TEXT,
+        instagram_media_id TEXT,
         media_type TEXT NOT NULL DEFAULT 'REEL',
         caption TEXT,
         hashtags TEXT,
@@ -52,6 +58,26 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_candidate_status ON candidate_media(status)",
     "CREATE INDEX IF NOT EXISTS idx_candidate_creator ON candidate_media(creator_id)",
+    # URL 입력 경로의 중복 차단. NULL은 제외해야 기존 행과 충돌하지 않는다.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_canonical "
+    "ON candidate_media(canonical_url) WHERE canonical_url IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_ig_media "
+    "ON candidate_media(instagram_media_id) WHERE instagram_media_id IS NOT NULL",
+    """
+    CREATE TABLE IF NOT EXISTS import_events (
+        import_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        media_pk INTEGER REFERENCES candidate_media(media_pk) ON DELETE SET NULL,
+        source TEXT NOT NULL,
+        source_file TEXT,
+        source_row INTEGER,
+        original_url TEXT,
+        canonical_url TEXT,
+        result TEXT NOT NULL,
+        error_message TEXT,
+        imported_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_import_result ON import_events(result, imported_at)",
     """
     CREATE TABLE IF NOT EXISTS media_analysis (
         analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,

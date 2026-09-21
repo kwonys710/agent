@@ -30,6 +30,13 @@ discovery:
   default_source: "import"  # import(CSV/URL) | hashtag(공식 API 권한 필요)
   import:
     path: "samples/candidates_sample.csv"
+  inbox:
+    # 실행 시 data/inbox/*.csv 를 자동으로 읽어 후보로 등록한다(Phase 12A).
+    # 원본 파일은 삭제하지 않고 processed/ 또는 failed/ 로 옮긴다.
+    enabled: true
+    path: "data/inbox"
+    processed_dir: "data/inbox/processed"
+    failed_dir: "data/inbox/failed"
   hashtag:
     # 공식 Graph API Hashtag Search 사용(IG_ACCESS_TOKEN / IG_BUSINESS_ACCOUNT_ID 필요)
     edge: "recent_media"      # recent_media(최근 24시간) | top_media
