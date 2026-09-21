@@ -84,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="후보 입력(inbox 포함)만 수행하고 분석/실행은 하지 않는다",
     )
+    parser.add_argument(
+        "--scheduled",
+        action="store_true",
+        help="Scheduled Run(배치): inbox 처리 → 신규 후보 분석 → Daily Summary 생성",
+    )
     parser.add_argument("--stats", action="store_true", help="DB 현황만 출력하고 종료")
     parser.add_argument(
         "--list-pending", action="store_true", help="운영자 확인 대기 Action 목록 출력"
@@ -334,6 +339,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.import_only:
         return run_import_only(config, args)
+
+    if args.scheduled:
+        from .scheduler.runner import format_result, run_scheduled
+
+        result = run_scheduled(config)
+        print(format_result(result))
+        return result.exit_code
 
     if args.rescore:
         conn = get_connection(config.db_path)

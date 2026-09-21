@@ -117,11 +117,12 @@ ai:
 - **127.0.0.1에서만 실행한다.** `0.0.0.0` 등 외부 인터페이스 바인딩이 감지되면 실행을 거부한다.
 - 오조작 대비: POST + 로컬 세션 토큰, 되돌리기(`--skip`, `--learn-reset`) 유지
 
-### Phase 15 — 스케줄 실행과 요약 리포트 (B5)
+### Phase 15 — 스케줄 실행과 요약 리포트 (완료)
 
-- `run_targeting.bat --schedule-install` : Windows 작업 스케줄러 등록(매일 1회)
-- 실행 요약을 `data/exports/summary_<날짜>.html`로 저장(오늘 수집/점수 분포/Action/한도 사용률)
-- 연속 실패 시 다음 실행 중단 플래그(app_state) + 요약에 표시
+- `run_targeting_scheduled.bat` + `setup_scheduler.bat`(Dry Run 기본, `-Install`로 등록/`-Uninstall`로 해제)
+- `data/reports/daily_summary_YYYYMMDD.html` + `latest.html` 생성(DB 기준, Claude 호출 없음)
+- 파일 lock으로 중복 실행 방지(stale lock 회수), `scheduled_runs` 이력 기록
+- **Scheduled Run은 Instagram Action을 실행하지 않는다**(승인된 Action도 실행하지 않음)
 
 완료 기준: 사람이 명령을 치지 않아도 매일 후보가 쌓이고, 아침에 요약 하나만 보면 된다.
 
@@ -178,9 +179,8 @@ ai:
 ## 7. 진행 순서 (확정)
 
 ```
-12A ✔ → 13 ✔ → 14 ✔ → 14.1 ✔ → 12B ✔ (지금까지 완료)
-  → 15  (Schedule + Daily Summary HTML)
-  → 16A (Response Tracking) / Learning·운영 안정화
+12A ✔ → 13 ✔ → 14 ✔ → 14.1 ✔ → 12B ✔ → 15 ✔ (지금까지 완료)
+  → Learning / 운영 안정화
 ```
 
 - Meta API(11A/11B)는 Optional이며 이 진행 순서를 막지 않는다.

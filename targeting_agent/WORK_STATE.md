@@ -93,7 +93,17 @@ Phase 12B 완료: Dashboard Candidate Input + 즉시 처리
 방향 변경: Meta API(Phase 11A/11B)는 필수 경로에서 제외 → Optional/Future.
 후보 입력은 Dashboard URL / CLI --add / inbox CSV 세 경로로 충족.
 
-Next: Phase 15 (Scheduler + Daily Summary)
+Phase 15 완료: Scheduler + Daily Summary
+- python -m targeting_agent.main --scheduled / run_targeting_scheduled.bat
+- inbox 처리 → NEW 후보만 분석(CandidateProcessor 재사용) → 통계 → Summary HTML
+- 파일 lock(중복 실행 방지, stale 회수, 비정상 종료 시에도 정리), scheduled_runs 이력
+- data/reports/daily_summary_*.html + latest.html, keep_days 기준 해당 파일만 정리
+- Scheduled Run은 Action Executor를 실행하지 않는다(승인된 Action 포함)
+- Windows Task Scheduler helper: setup_scheduler.bat / scripts/install_scheduler.ps1
+  (기본 Dry Run, -Install/-Uninstall, 공백·한글 경로 quoting 처리)
+
+Next: Learning / 운영 안정화
+Meta API: Optional (진행을 막지 않음)
 
 Pending:
 - 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)

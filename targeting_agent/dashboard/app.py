@@ -18,6 +18,7 @@ import sqlite3
 import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from ..core.config import Config, load_config
@@ -416,6 +417,13 @@ def serve(config: Config) -> None:
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/report":
+                report = _latest_report_path(config)
+                if not report.exists():
+                    self.send_error(404, "no report yet")
+                    return
+                self._send_html(report.read_text(encoding="utf-8"))
+                return
             if parsed.path not in ("/", "/index.html"):
                 self.send_error(404)
                 return

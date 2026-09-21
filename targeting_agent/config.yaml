@@ -166,6 +166,22 @@ learning:
   min_keyword_media: 2          # 서로 다른 게시물 몇 개에서 반복돼야 하는지
   min_keyword_score: 2.0        # 키워드 신호 강도 임계값
 
+scheduler:
+  # Windows Task Scheduler가 하루 1회 실행하는 배치 모드(python -m targeting_agent.main --scheduled).
+  # Scheduled Run은 후보 수집·분석과 요약까지만 하고, Instagram Action은 실행하지 않는다.
+  enabled: true
+  process_inbox: true
+  process_new_candidates: true
+  max_candidates_per_run: 10
+  lock:
+    enabled: true
+    path: "data/.scheduler.lock"
+    stale_minutes: 60
+  summary:
+    enabled: true
+    output_dir: "data/reports"
+    keep_days: 30
+
 dashboard:
   enabled: true
   # 127.0.0.1 / localhost 외의 값을 넣으면 실행을 거부한다(외부 노출 방지).

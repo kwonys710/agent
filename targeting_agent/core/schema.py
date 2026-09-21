@@ -8,6 +8,8 @@
 - comment_drafts(media_pk, normalized_text) UNIQUE (동일 댓글 중복 저장 차단)
 - candidate_media.canonical_url UNIQUE (URL 입력 시 동일 게시물 중복 차단)
 
+v6(Phase 15): scheduled_runs — Scheduled Run 이력.
+
 v5(Phase 12B): import_events.note — 입력 시 남긴 메모(후보 테이블은 건드리지 않는다).
 
 v4(Phase 14): action_queue.approved_at — Dashboard에서 운영자가 승인한 시각.
@@ -20,7 +22,7 @@ import_events 테이블 추가. 기존 DB는 core/database.py의 마이그레이
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -192,6 +194,20 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         media_pk INTEGER REFERENCES candidate_media(media_pk) ON DELETE SET NULL,
         payload TEXT NOT NULL,
         created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS scheduled_runs (
+        run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        status TEXT NOT NULL,
+        candidates_processed INTEGER NOT NULL DEFAULT 0,
+        claude_calls INTEGER NOT NULL DEFAULT 0,
+        cache_hits INTEGER NOT NULL DEFAULT 0,
+        fallbacks INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        summary_file TEXT
     )
     """,
     """

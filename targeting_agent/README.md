@@ -258,7 +258,58 @@ status = 'PENDING'  AND  approved_at IS NOT NULL
 `run_targeting.bat` 실행 결과에 `승인 대기 N건`으로 표시되며, Dashboard의 Action Queue
 탭에서는 `승인 대기` / `실행 대기(승인됨)`로 구분된다.
 
-## 9. 실행 결과물
+## 9. 자동 운영 — Scheduler (Phase 15)
+
+매일 정해진 시각에 후보 수집·분석과 요약까지 자동으로 처리한다.
+**Instagram 좋아요/댓글은 실행하지 않는다**(승인된 Action이 있어도 실행하지 않는다).
+
+### 9-1. 수동으로 한 번 돌려보기
+
+```bat
+run_targeting_scheduled.bat
+```
+
+→ `data/inbox/*.csv` 처리 → 신규 후보 분석(캐시·한도 준수) → `data/reports/daily_summary_YYYYMMDD.html` 생성
+
+### 9-2. 매일 자동 실행 등록
+
+```bat
+setup_scheduler.bat 19:00           :: 등록될 내용만 확인(Dry Run)
+setup_scheduler.bat 19:00 install   :: 실제 등록
+setup_scheduler.bat uninstall       :: 등록 해제
+```
+
+PowerShell로 직접 실행해도 된다:
+
+```bat
+powershell -ExecutionPolicy Bypass -File targeting_agent\scripts\install_scheduler.ps1 -Time "19:00"
+powershell -ExecutionPolicy Bypass -File targeting_agent\scripts\install_scheduler.ps1 -Time "19:00" -Install
+powershell -ExecutionPolicy Bypass -File targeting_agent\scripts\install_scheduler.ps1 -Uninstall
+```
+
+- 기본은 Dry Run이다. `-Install`을 붙여야 실제로 등록된다.
+- 작업 이름: `DailyReels_Targeting_Agent`, 관리자 권한 없이 현재 사용자 계정으로 등록된다.
+- Python 내부에서 시간을 기다리지 않는다. 실행되면 1회 작업하고 종료한다.
+
+### 9-3. 결과 확인
+
+| 위치 | 내용 |
+| --- | --- |
+| `data/reports/latest.html` | 가장 최근 요약(Dashboard에서 `오늘 Daily Summary 열기`로도 열린다) |
+| `data/reports/daily_summary_YYYYMMDD.html` | 날짜별 요약(`scheduler.summary.keep_days` 지나면 이 파일만 정리) |
+| `data/logs/targeting_YYYYMMDD.log` | 실행 로그 |
+| `scheduled_runs` 테이블 | 실행 이력(처리 건수·Claude 호출·오류·요약 파일) |
+
+요약에는 Candidate / AI 사용량 / Score / Action Queue / Feedback / Inbox 집계가 들어간다.
+**요약 문장을 만들기 위해 Claude를 호출하지 않는다**(DB에서 결정론적으로 생성).
+
+Token Guard: 신규 후보가 없으면 호출 0, 이미 분석됐으면 호출 0, 캐시 적중이면 호출 0,
+정보 부족이면 호출 0, 일일 한도 도달 시 heuristic으로 진행한다.
+`scheduler.max_candidates_per_run`을 넘는 후보는 다음 실행으로 이월된다.
+
+종료 코드: 정상 0 / 실행 자체 실패만 1(후보 개별 오류는 0 유지).
+
+## 10. 실행 결과물
 
 | 경로 | 내용 |
 | --- | --- |
@@ -266,7 +317,7 @@ status = 'PENDING'  AND  approved_at IS NOT NULL
 | `targeting_agent/data/exports/manual_actions_<run_id>.csv` | 수동 처리용 Action 목록 |
 | `targeting_agent/data/logs/targeting_<날짜>.log` | 실행 로그(기본 30일 보관) |
 
-## 10. Instagram 공식 API 지원 범위 (확인 결과)
+## 11. Instagram 공식 API 지원 범위 (확인 결과)
 
 ### 8-1. 읽기 — 지원
 | 항목 | 내용 |
@@ -297,7 +348,7 @@ Creator 단위 한도/cooldown을 적용할 수 없다. 따라서 `safety.skip_u
 > 위 내용은 구현 시점(2026-09)에 확인한 범위다. Meta 정책은 자주 바뀌므로
 > 실제 토큰/권한을 받은 뒤 공식 문서로 한 번 더 확인할 것.
 
-## 11. 실제 처리 흐름 (manual 모드)
+## 12. 실제 처리 흐름 (manual 모드)
 
 `--no-dry-run`으로 실행해도 프로그램이 Instagram에 접속하지 않는다.
 대신 처리 목록을 만들고 Action을 **확인 대기(APPROVED)** 상태로 둔다.
@@ -314,7 +365,7 @@ run_targeting.bat --skip 14        :: 안 한 건은 취소
 확인 대기 건도 일일 한도 계산에 포함되어, 한도를 넘는 목록이 만들어지지 않는다.
 Dry Run(기본)에서는 지금까지처럼 시뮬레이션으로 SUCCESS 처리된다.
 
-## 12. Feedback 학습 (Phase 10)
+## 13. Feedback 학습 (Phase 10)
 
 Machine Learning 모델은 쓰지 않는다. Feedback을 모아 **Profile 키워드와 Score 가중치 조정안**을
 계산하고, 운영자가 승인할 때만 반영한다.
@@ -353,7 +404,7 @@ run_targeting.bat --learn-reset   :: 되돌리기
   이후 실행에서 새 기준으로 다시 계산된다. 이미 처리된 후보는 `--rescore`로 되돌려야 다시 평가된다.
 - `learning.profile_update_interval_days`(기본 7) 이내 재반영은 건너뛴다.
 
-## 13. 안전 원칙
+## 14. 안전 원칙
 
 - 기본값은 Dry Run이며, 실제 자동 좋아요/댓글을 수행하지 않는다.
 - Rate Limit은 **플랫폼 제한 우회가 아니라 운영자가 정한 내부 보수적 한도**다.
@@ -364,13 +415,13 @@ run_targeting.bat --learn-reset   :: 되돌리기
   금지선을 지키면서 만들 수 있는 것이 사실상 없고, 제재 위험은 운영자 계정이 진다.
 - 플랫폼 경고/인증 요구가 감지되면 자동 실행을 즉시 중단한다.
 
-## 14. 테스트
+## 15. 테스트
 
 ```bash
 python -m pytest targeting_agent/tests -q
 ```
 
-## 15. 현재 구현 범위
+## 16. 현재 구현 범위
 
 | 상태 | 항목 |
 | --- | --- |
