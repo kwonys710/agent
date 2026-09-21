@@ -20,6 +20,13 @@ if __package__ in (None, ""):  # pragma: no cover - `python targeting_agent/main
 
 from .core.config import Config, load_config
 from .core.database import get_connection, get_stats, init_db, today_str
+from .actions.confirm import (
+    confirm_actions,
+    format_awaiting,
+    list_awaiting,
+    parse_ids,
+    skip_actions,
+)
 from .core.exceptions import TargetingError
 from .core.logger import get_logger, setup_logging
 from .pipeline import TargetingPipeline, format_summary, next_run_id
@@ -44,6 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.set_defaults(dry_run=None)
     parser.add_argument("--stats", action="store_true", help="DB 현황만 출력하고 종료")
+    parser.add_argument(
+        "--list-pending", action="store_true", help="운영자 확인 대기 Action 목록 출력"
+    )
+    parser.add_argument(
+        "--confirm", metavar="ID|all", default=None, help="직접 처리한 Action을 기록"
+    )
+    parser.add_argument(
+        "--skip", metavar="ID|all", default=None, help="처리하지 않은 Action을 취소"
+    )
     parser.add_argument("--dashboard", action="store_true", help="로컬 Dashboard 실행")
     parser.add_argument("--seed", type=int, default=None, help="댓글 생성 난수 seed(테스트용)")
     return parser
@@ -80,6 +96,42 @@ def print_stats(config: Config) -> int:
     return 0
 
 
+def run_confirmation(config: Config, args: argparse.Namespace) -> int:
+    """--list-pending / --confirm / --skip 처리."""
+    conn = get_connection(config.db_path)
+    try:
+        init_db(conn)
+        if args.list_pending:
+            print(format_awaiting(list_awaiting(conn)))
+            return 0
+
+        raw = args.confirm if args.confirm is not None else args.skip
+        try:
+            select_all, ids = parse_ids(str(raw))
+        except ValueError as exc:
+            print(f"[오류] {exc}", file=sys.stderr)
+            return 2
+        if not select_all and not ids:
+            print("[오류] Action ID 또는 all 을 지정하세요.", file=sys.stderr)
+            return 2
+
+        if args.confirm is not None:
+            result = confirm_actions(conn, config, select_all=select_all, action_ids=ids)
+            print(f"확인 완료: {result.confirmed}건")
+            for message in result.over_limit:
+                print(f"[경고] {message}")
+        else:
+            result = skip_actions(conn, select_all=select_all, action_ids=ids)
+            print(f"취소 완료: {result.skipped}건")
+
+        if result.not_found:
+            missing = ", ".join(str(i) for i in result.not_found)
+            print(f"[알림] 확인 대기 목록에 없는 Action ID: {missing}")
+        return 0
+    finally:
+        conn.close()
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -104,6 +156,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         serve(config)
         return 0
+
+    if args.list_pending or args.confirm is not None or args.skip is not None:
+        return run_confirmation(config, args)
 
     if args.stats:
         return print_stats(config)

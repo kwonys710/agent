@@ -38,7 +38,10 @@ run_targeting.bat
 | `run_targeting.bat --limit 5` | 이번 실행 최대 Action 수 |
 | `run_targeting.bat --stats` | 현재 DB 현황만 출력 |
 | `run_targeting.bat --dashboard` | 로컬 Dashboard(http://127.0.0.1:8501) |
-| `run_targeting.bat --no-dry-run` | Dry Run 해제(ManualExecutor는 여전히 목록만 생성) |
+| `run_targeting.bat --no-dry-run` | 실제 처리 대상 목록 생성(확인 대기 상태) |
+| `run_targeting.bat --list-pending` | 확인 대기 중인 Action 목록 |
+| `run_targeting.bat --confirm all` | 직접 처리한 Action을 기록(`--confirm 12,13`도 가능) |
+| `run_targeting.bat --skip 14` | 처리하지 않기로 한 Action 취소 |
 
 Python으로 직접 실행하려면 프로젝트 루트에서:
 
@@ -147,22 +150,41 @@ Creator 단위 한도/cooldown을 적용할 수 없다. 따라서 `safety.skip_u
 > 위 내용은 구현 시점(2026-09)에 확인한 범위다. Meta 정책은 자주 바뀌므로
 > 실제 토큰/권한을 받은 뒤 공식 문서로 한 번 더 확인할 것.
 
-## 9. 안전 원칙
+## 9. 실제 처리 흐름 (manual 모드)
+
+`--no-dry-run`으로 실행해도 프로그램이 Instagram에 접속하지 않는다.
+대신 처리 목록을 만들고 Action을 **확인 대기(APPROVED)** 상태로 둔다.
+
+```bat
+run_targeting.bat --no-dry-run     :: 1) 대상 선정 → 목록 생성(확인 대기)
+                                   :: 2) data/exports/manual_actions_<run>.md 를 보고 직접 처리
+run_targeting.bat --list-pending   :: 3) 대기 목록 확인
+run_targeting.bat --confirm all    :: 4) 처리한 건을 기록(일부만 → --confirm 12,13)
+run_targeting.bat --skip 14        :: 안 한 건은 취소
+```
+
+확인(`--confirm`) 시점에만 Interaction으로 기록되므로 **하지 않은 일이 성공으로 남지 않는다.**
+확인 대기 건도 일일 한도 계산에 포함되어, 한도를 넘는 목록이 만들어지지 않는다.
+Dry Run(기본)에서는 지금까지처럼 시뮬레이션으로 SUCCESS 처리된다.
+
+## 10. 안전 원칙
 
 - 기본값은 Dry Run이며, 실제 자동 좋아요/댓글을 수행하지 않는다.
 - Rate Limit은 **플랫폼 제한 우회가 아니라 운영자가 정한 내부 보수적 한도**다.
 - 동일 게시물 / 동일 Creator / 동일 댓글 중복은 DB 제약과 필터로 차단한다.
 - 광고·협찬·민감 콘텐츠·비공개 계정은 대상에서 제외한다.
 - 탐지 우회, CAPTCHA 우회, Challenge 우회, 자동화 위장 기능은 구현하지 않는다.
+- **BrowserExecutor는 구현하지 않는다**(Phase 9 검토 결과, `docs/phase9_browser_executor.md`).
+  금지선을 지키면서 만들 수 있는 것이 사실상 없고, 제재 위험은 운영자 계정이 진다.
 - 플랫폼 경고/인증 요구가 감지되면 자동 실행을 즉시 중단한다.
 
-## 10. 테스트
+## 11. 테스트
 
 ```bash
 python -m pytest targeting_agent/tests -q
 ```
 
-## 11. 현재 구현 범위
+## 12. 현재 구현 범위
 
 | 상태 | 항목 |
 | --- | --- |
@@ -170,6 +192,6 @@ python -m pytest targeting_agent/tests -q
 | 선택 사용 | Gemini 분석/댓글 생성(API Key 필요) |
 | 구현 완료(조건부) | HashtagDiscovery — 공식 API 토큰/권한 필요, Creator 미확인 제약 있음 |
 | 미지원 확인 | OfficialAPIExecutor 쓰기(공식 API에 해당 기능 없음) |
-| Stub | BrowserExecutor (Phase 9 검토) |
+| 구현 안 함(결정) | BrowserExecutor — Phase 9 검토 결과 미구현, `docs/phase9_browser_executor.md` 참고 |
 
 자세한 진행 상태는 `WORK_STATE.md` 참고.

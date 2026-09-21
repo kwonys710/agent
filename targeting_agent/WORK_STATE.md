@@ -1,6 +1,6 @@
 # Targeting Agent 작업 상태
 
-Current Phase: 8 완료
+Current Phase: 9 완료
 
 Completed:
 - Phase 1: 구조 / config.yaml / .env.example / SQLite / Logging
@@ -13,6 +13,10 @@ Completed:
 - Phase 8: 공식 Graph API 지원 범위 확인 →
   Hashtag Search 읽기 구현(7일 30개 한도 준수, urllib만 사용),
   OfficialAPIExecutor는 쓰기 미지원 확정(토큰 검증/health_check만 수행)
+- Phase 9: BrowserExecutor 구현하지 않기로 결정(docs/phase9_browser_executor.md).
+  대신 수동 실행 흐름 보강 — 실제 모드는 APPROVED(확인 대기)로 남기고
+  --list-pending/--confirm/--skip 으로 처리, 확인 대기 건도 일일 한도에 포함,
+  체크리스트 Markdown 생성
 - Phase 10 일부: Feedback 기록 + 가중치 조정 제안(ML 없음)
 
 공식 API 확인 결과(2026-09):
@@ -26,8 +30,7 @@ Completed:
   safety.skip_unresolved_creator=true면 Action을 만들지 않는다.
 
 Last Test:
-python -m pytest targeting_agent/tests -q  → 72 passed
+python -m pytest targeting_agent/tests -q  → 84 passed
 
 Pending:
-- Phase 9: BrowserExecutor 필요성 검토
 - Phase 10: Feedback → Target Profile 자동 반영

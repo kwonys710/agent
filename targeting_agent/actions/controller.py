@@ -37,6 +37,7 @@ class ExecutionSummary:
     success: int = 0
     skipped: int = 0
     failed: int = 0
+    awaiting: int = 0  # 목록에 올렸고 운영자 확인을 기다리는 건수(실제 모드)
     halted: bool = False
     halt_reason: str = ""
     skip_reasons: dict[str, int] = field(default_factory=dict)
@@ -126,6 +127,10 @@ class ActionController:
                     summary.success += 1
                     self.rate_limiter.record_executed()
                     bump_stat(self.conn, self._date, f"{action.action_type.value.lower()}_success")
+                elif result.status is ActionStatus.APPROVED:
+                    # 실제 처리는 운영자가 한다. 확인(--confirm) 전까지 Interaction으로 세지 않는다.
+                    summary.awaiting += 1
+                    self.rate_limiter.record_executed()
                 elif result.status is ActionStatus.SKIPPED:
                     summary.skipped += 1
                     summary.note_skip(result.detail or "executor_skip")

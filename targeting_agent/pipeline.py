@@ -389,6 +389,8 @@ def format_summary(summary: RunSummary, config: Config) -> str:
         f"   SKIPPED   : {summary.execution.skipped}",
         f"   ERROR     : {summary.execution.failed}",
     ]
+    if summary.execution.awaiting:
+        lines.append(f"   확인 대기 : {summary.execution.awaiting} (처리 후 --confirm)")
     if summary.execution.skip_reasons:
         reasons = ", ".join(f"{k}={v}" for k, v in sorted(summary.execution.skip_reasons.items()))
         lines.append(f"   Skip 사유 : {reasons}")

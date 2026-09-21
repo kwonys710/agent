@@ -23,6 +23,7 @@ from typing import Optional
 from ..core.config import Config
 from ..core.database import (
     count_actions_today,
+    count_awaiting_today,
     count_creator_actions_today,
     count_creator_media_today,
     has_interaction,
@@ -62,7 +63,14 @@ class RateLimiter:
 
     # --- 조회 ------------------------------------------------------------
     def used_today(self, action_type: ActionType) -> int:
-        return count_actions_today(self.conn, action_type, self._date, self.dry_run, self.tz_offset)
+        """오늘 사용량 = 기록된 Interaction + 운영자 확인 대기 중인 Action."""
+        done = count_actions_today(
+            self.conn, action_type, self._date, self.dry_run, self.tz_offset
+        )
+        awaiting = count_awaiting_today(
+            self.conn, action_type, self._date, self.dry_run, self.tz_offset
+        )
+        return done + awaiting
 
     def remaining(self, action_type: ActionType) -> int:
         return max(0, self.daily_limits.get(action_type, 0) - self.used_today(action_type))

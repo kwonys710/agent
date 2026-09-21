@@ -338,7 +338,8 @@ def fetch_pending_actions(conn: sqlite3.Connection, limit: Optional[int] = None)
         "FROM action_queue a "
         "JOIN candidate_media m ON m.media_pk = a.media_pk "
         "JOIN creators c ON c.creator_id = a.creator_id "
-        "WHERE a.status IN ('PENDING', 'APPROVED') "
+        # APPROVED는 '운영자 확인 대기' 상태이므로 재실행 대상이 아니다.
+        "WHERE a.status = 'PENDING' "
         "ORDER BY a.priority DESC, a.target_score DESC, a.action_id ASC"
     )
     params: list[Any] = []
@@ -432,9 +433,9 @@ def has_interaction(
     return conn.execute(sql + " LIMIT 1", params).fetchone() is not None
 
 
-def _local_date_expr(tz_offset_hours: int) -> str:
-    """UTC로 저장된 executed_at을 운영 timezone 기준 날짜로 변환하는 SQL 식."""
-    return f"date(executed_at, '{tz_offset_hours:+d} hours')"
+def _local_date_expr(tz_offset_hours: int, column: str = "executed_at") -> str:
+    """UTC로 저장된 타임스탬프를 운영 timezone 기준 날짜로 변환하는 SQL 식."""
+    return f"date({column}, '{tz_offset_hours:+d} hours')"
 
 
 def count_actions_today(
@@ -468,6 +469,41 @@ def count_creator_actions_today(
         (creator_id, int(dry_run), date_str),
     ).fetchone()
     return int(row["n"])
+
+
+def count_awaiting_today(
+    conn: sqlite3.Connection,
+    action_type: ActionType,
+    date_str: str,
+    dry_run: bool,
+    tz_offset_hours: int = DEFAULT_TZ_OFFSET_HOURS,
+) -> int:
+    """오늘 목록에 올라가 운영자 확인을 기다리는 Action 수.
+
+    아직 Interaction으로 기록되지 않았지만 곧 실제로 수행될 건이므로
+    일일 한도 계산에 포함해야 한도를 초과한 목록이 만들어지지 않는다.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM action_queue "
+        "WHERE action_type = ? AND status = 'APPROVED' AND dry_run = ? "
+        f"AND {_local_date_expr(tz_offset_hours, 'updated_at')} = ?",
+        (action_type.value, int(dry_run), date_str),
+    ).fetchone()
+    return int(row["n"])
+
+
+def fetch_awaiting_actions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """운영자 확인 대기(APPROVED) Action 목록."""
+    return list(
+        conn.execute(
+            "SELECT a.*, m.media_id, m.permalink, c.username "
+            "FROM action_queue a "
+            "JOIN candidate_media m ON m.media_pk = a.media_pk "
+            "JOIN creators c ON c.creator_id = a.creator_id "
+            "WHERE a.status = 'APPROVED' "
+            "ORDER BY a.priority DESC, a.action_id ASC"
+        ).fetchall()
+    )
 
 
 def count_creator_media_today(
