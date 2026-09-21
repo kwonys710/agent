@@ -1,0 +1,11 @@
+media_id,permalink,username,caption,hashtags,media_type,like_count,comment_count,posted_at,followers,is_private,is_ad,language
+SAMPLE001,https://www.instagram.com/reel/SAMPLE001/,office_daily_kim,오늘도 야근 끝 퇴근길 지하철 브이로그 #직장인 #퇴근 #일상브이로그,직장인 퇴근 일상브이로그,REEL,420,23,2026-09-18,5200,0,0,ko
+SAMPLE002,https://www.instagram.com/reel/SAMPLE002/,weekend_cafe_log,주말 아침 조용한 동네 카페에서 브런치 #주말 #카페 #브런치,주말 카페 브런치,REEL,860,54,2026-09-20,9100,0,0,ko
+SAMPLE003,https://www.instagram.com/reel/SAMPLE003/,lunch_seoul,회사 근처 점심 맛집 혼밥 기록 #직장인 #점심 #맛집,직장인 점심 맛집,REEL,310,12,2026-09-15,3100,0,0,ko
+SAMPLE004,https://www.instagram.com/reel/SAMPLE004/,promo_shop_official,신상 특가 공구 오픈 링크는 프로필에 #광고 #협찬,광고 협찬 공구,REEL,120,3,2026-09-19,15000,0,1,ko
+SAMPLE005,https://www.instagram.com/reel/SAMPLE005/,private_user_01,비공개 계정 테스트 게시물 #일상,일상,REEL,40,1,2026-09-17,800,1,0,ko
+SAMPLE006,https://www.instagram.com/reel/SAMPLE006/,travel_en_daily,Morning routine before work in London #vlog #morning,vlog morning,REEL,940,61,2026-09-16,12000,0,0,en
+SAMPLE007,https://www.instagram.com/reel/SAMPLE007/,commute_story,출근길 버스에서 보는 아침 하늘 #출근 #직장인일상 #데일리,출근 직장인일상 데일리,REEL,640,38,2026-09-20,4400,0,0,ko
+SAMPLE008,https://www.instagram.com/reel/SAMPLE008/,weekend_walk_kr,주말 한강 산책하고 카페에서 마무리 #주말일상 #산책 #카페,주말일상 산책 카페,REEL,1200,77,2026-09-21,7800,0,0,ko
+SAMPLE009,https://www.instagram.com/reel/SAMPLE009/,mega_influencer_kr,대형 계정 일상 브이로그 #일상브이로그,일상브이로그,REEL,52000,900,2026-09-19,410000,0,0,ko
+SAMPLE010,https://www.instagram.com/reel/SAMPLE010/,office_daily_kim,퇴근 후 집에서 저녁 만들어 먹기 #퇴근후 #직장인 #일상,퇴근후 직장인 일상,REEL,500,29,2026-09-21,5200,0,0,ko

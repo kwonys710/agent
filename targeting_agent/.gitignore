@@ -1,0 +1,10 @@
+# 실행 산출물(저장소에 올리지 않는다)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/logs/
+data/exports/
+data/cache/
+.env
+__pycache__/
+*.pyc

@@ -1,0 +1,144 @@
+# DailyReels Targeting Agent 설정
+# 모든 운영 값은 여기서 관리한다. API Key/Token은 여기 두지 말고 .env에 둘 것.
+
+project:
+  name: "DailyReels Targeting Agent"
+  version: "0.1.0"
+
+paths:
+  data_dir: "data"
+  database: "data/targeting.db"
+  log_dir: "data/logs"
+  export_dir: "data/exports"
+  cache_dir: "data/cache"
+
+profile:
+  # DailyReels Target Profile (코드에 고정하지 않고 파일/DB에서 읽는다)
+  path: "profiles/dailyreels.yaml"
+
+instagram:
+  account_type: "creator"
+
+executor:
+  mode: "manual"            # manual | official_api | browser
+  stop_on_challenge: true
+  stop_on_rate_limit: true
+  stop_on_login_required: true
+
+discovery:
+  enabled: true
+  default_source: "import"  # import(CSV/URL) | hashtag(공식 API 필요)
+  import:
+    path: "samples/candidates_sample.csv"
+  hashtags:
+    - 직장인
+    - 직장인브이로그
+    - 회사원
+    - 출근
+    - 퇴근
+    - 퇴근후
+    - 데일리
+    - 일상브이로그
+    - 직장인일상
+    - 맛집
+    - 카페
+    - 주말
+    - 주말일상
+  languages:
+    - ko
+  content_types:
+    - REEL
+  max_candidates_per_run: 200
+  creator:
+    min_followers: 100
+    max_followers: 30000
+
+analysis:
+  provider: "gemini"            # gemini | heuristic
+  model: "gemini-2.0-flash"
+  fallback_to_heuristic: true   # API Key가 없거나 호출 실패 시 규칙 기반 분석으로 대체
+  analyzer_version: "1"
+  prompt_version: "1"
+  use_caption: true
+  use_hashtags: true
+  use_creator_profile: true
+  use_visual_analysis: false    # v0.1은 영상 다운로드/시각분석을 하지 않는다
+  max_media_per_run: 100
+
+scoring:
+  minimum_target_score: 70
+  auto_action_score: 82
+  weights:
+    content_similarity: 0.35
+    creator_fit: 0.20
+    activity: 0.15
+    engagement: 0.15
+    language_region: 0.10
+    novelty: 0.05
+
+comments:
+  enabled: true
+  provider: "template"          # template | gemini
+  language: "ko"
+  min_length: 5
+  max_length: 60
+  candidates_per_post: 3
+  max_generation_attempts: 4
+  allow_emoji: true
+  max_emoji: 1
+  avoid_generic_comments: true
+  require_context_keyword: true
+  banned_phrases:
+    - "잘 보고 갑니다"
+    - "좋은 영상이네요"
+    - "영상 잘 봤어요"
+    - "맞팔"
+    - "소통해요"
+  duplicate_similarity_threshold: 0.86
+  duplicate_compare_limit: 300
+
+actions:
+  enable_like: true
+  enable_comment: true
+  require_score_for_like: 75
+  require_score_for_comment: 82
+  daily_limits:
+    likes: 20
+    comments: 8
+    timezone_offset_hours: 9
+  per_creator:
+    max_actions_per_day: 1
+    cooldown_days: 7
+    count_mode: "media"   # media: 같은 게시물 LIKE+COMMENT를 1건으로 집계 | action: 각각 1건
+  execution:
+    max_actions_per_run: 10
+    stop_if_error_count: 3
+    dry_run: true
+
+safety:
+  skip_private_accounts: true
+  skip_ads: true
+  skip_sensitive_content: true
+  skip_if_already_interacted: true
+  block_duplicate_comments: true
+  halt_on_platform_warning: true
+
+learning:
+  enabled: true
+  track:
+    - selected
+    - skipped
+    - liked
+    - commented
+    - responded
+    - followed_after_interaction
+  profile_update_interval_days: 7
+
+dashboard:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8501
+
+logging:
+  level: "INFO"
+  keep_days: 30

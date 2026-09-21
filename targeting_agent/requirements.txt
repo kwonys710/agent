@@ -1,0 +1,11 @@
+# Targeting Agent 최소 의존성
+PyYAML>=6.0.1
+
+# .env 로더(선택). 없으면 core/config.py의 내장 최소 파서로 동작한다.
+python-dotenv>=1.0.0
+
+# 테스트
+pytest>=7.4.0
+
+# analysis.provider=gemini 를 실제로 사용할 때만 필요(없으면 heuristic으로 fallback)
+# google-genai>=0.3.0
