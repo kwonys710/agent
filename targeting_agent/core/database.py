@@ -184,6 +184,20 @@ def update_candidate_status(
     )
 
 
+def reset_skipped_for_rescore(conn: sqlite3.Connection) -> int:
+    """점수 미달로 SKIPPED된 후보를 NEW로 되돌린다(학습 반영 후 재채점용).
+
+    이미 Interaction이 있는 후보와 BLOCKED(광고/민감/회피 키워드) 후보는 건드리지 않는다.
+    """
+    cursor = conn.execute(
+        "UPDATE candidate_media SET status = ?, status_reason = 'rescore', updated_at = ? "
+        "WHERE status = ? AND media_pk NOT IN (SELECT media_pk FROM interactions)",
+        (MediaStatus.NEW.value, utc_now(), MediaStatus.SKIPPED.value),
+    )
+    conn.commit()
+    return int(cursor.rowcount)
+
+
 # --- analysis cache ------------------------------------------------------
 def get_cached_analysis(
     conn: sqlite3.Connection,

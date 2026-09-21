@@ -6,6 +6,7 @@ Feedback 데이터를 축적하고 집계하는 구조까지만 제공한다.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from typing import Optional
 
 from ..core.database import utc_now
@@ -46,6 +47,71 @@ def record_action_feedback(
         return None
     return record_feedback(
         conn, feedback_type, media_pk=media_pk, creator_id=creator_id, action_id=action_id
+    )
+
+
+@dataclass(frozen=True)
+class FeedbackTarget:
+    """Feedback을 붙일 대상(Action / Media / Creator)."""
+
+    media_pk: Optional[int] = None
+    creator_id: Optional[int] = None
+    action_id: Optional[int] = None
+    label: str = ""
+
+
+def resolve_target(conn: sqlite3.Connection, raw: str) -> FeedbackTarget:
+    """'12'(action_id) / '@username'(creator) / 'ABC123'(media_id)를 대상으로 변환한다."""
+    value = (raw or "").strip()
+    if not value:
+        raise ValueError("Feedback 대상을 지정하세요 (Action ID / @username / media_id).")
+
+    if value.startswith("@"):
+        row = conn.execute(
+            "SELECT creator_id FROM creators WHERE username = ?", (value[1:],)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Creator를 찾을 수 없습니다: {value}")
+        return FeedbackTarget(creator_id=int(row["creator_id"]), label=value)
+
+    if value.isdigit():
+        row = conn.execute(
+            "SELECT action_id, media_pk, creator_id FROM action_queue WHERE action_id = ?",
+            (int(value),),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Action을 찾을 수 없습니다: {value}")
+        return FeedbackTarget(
+            media_pk=int(row["media_pk"]),
+            creator_id=int(row["creator_id"]),
+            action_id=int(row["action_id"]),
+            label=f"action:{value}",
+        )
+
+    row = conn.execute(
+        "SELECT media_pk, creator_id FROM candidate_media WHERE media_id = ?", (value,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"Media를 찾을 수 없습니다: {value}")
+    return FeedbackTarget(
+        media_pk=int(row["media_pk"]), creator_id=int(row["creator_id"]), label=f"media:{value}"
+    )
+
+
+def record_for_target(
+    conn: sqlite3.Connection,
+    feedback_type: FeedbackType,
+    target: FeedbackTarget,
+    note: str = "",
+) -> int:
+    """해석된 대상에 Feedback을 기록한다."""
+    return record_feedback(
+        conn,
+        feedback_type,
+        media_pk=target.media_pk,
+        creator_id=target.creator_id,
+        action_id=target.action_id,
+        note=note,
     )
 
 

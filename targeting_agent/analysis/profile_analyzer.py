@@ -107,6 +107,27 @@ def load_profile(
     return profile_from_mapping(data, source=str(path))
 
 
+def profile_to_mapping(profile: TargetProfile) -> dict[str, Any]:
+    """TargetProfile을 파일/DB 저장용 매핑으로 되돌린다(원본 구조 유지)."""
+    data = dict(profile.extra) if profile.extra else {}
+    data["version"] = profile.version
+    data["language"] = profile.language
+    data["weekday"] = {**dict(data.get("weekday") or {}), "keywords": list(profile.weekday_keywords)}
+    data["weekend"] = {**dict(data.get("weekend") or {}), "keywords": list(profile.weekend_keywords)}
+    data["shared"] = {**dict(data.get("shared") or {}), "keywords": list(profile.shared_keywords)}
+    data["avoid_keywords"] = list(profile.avoid_keywords)
+    data["preferred_media_types"] = list(profile.preferred_media_types)
+    return data
+
+
+def bump_version(version: str) -> str:
+    """Profile 버전을 올린다. 버전이 바뀌면 분석/점수 캐시가 무효화된다."""
+    try:
+        return str(int(str(version).strip()) + 1)
+    except ValueError:
+        return f"{version}+1"
+
+
 def creator_fit(
     followers: int,
     *,

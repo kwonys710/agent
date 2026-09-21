@@ -1,6 +1,6 @@
 # Targeting Agent 작업 상태
 
-Current Phase: 9 완료
+Current Phase: 10 완료 (v0.1 계획 범위 전체 완료)
 
 Completed:
 - Phase 1: 구조 / config.yaml / .env.example / SQLite / Logging
@@ -17,7 +17,9 @@ Completed:
   대신 수동 실행 흐름 보강 — 실제 모드는 APPROVED(확인 대기)로 남기고
   --list-pending/--confirm/--skip 으로 처리, 확인 대기 건도 일일 한도에 포함,
   체크리스트 Markdown 생성
-- Phase 10 일부: Feedback 기록 + 가중치 조정 제안(ML 없음)
+- Phase 10: Feedback 입력 CLI(--feedback/--target), 해시태그 기반 키워드 학습,
+  Profile/가중치 override(app_state) 반영·초기화, --rescore 재채점,
+  Profile 키워드 역전 방지 가드(변형 형태 포함)
 
 공식 API 확인 결과(2026-09):
 - 읽기 가능: ig_hashtag_search, {hashtag-id}/top_media|recent_media
@@ -30,7 +32,9 @@ Completed:
   safety.skip_unresolved_creator=true면 Action을 만들지 않는다.
 
 Last Test:
-python -m pytest targeting_agent/tests -q  → 84 passed
+python -m pytest targeting_agent/tests -q  → 101 passed
 
 Pending:
-- Phase 10: Feedback → Target Profile 자동 반영
+- 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)
+- Gemini 분석/댓글 생성 실사용 검증(API Key 필요)
+- 운영 데이터 축적 후 학습 임계값(min_keyword_media 등) 재조정

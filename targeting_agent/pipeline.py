@@ -40,6 +40,7 @@ from .core.models import DraftStatus, MediaStatus, RawCandidate
 from .discovery.base import dedupe_candidates, filter_by_config
 from .discovery.hashtag_discovery import HashtagDiscovery
 from .discovery.import_source import ImportDiscovery
+from .learning.profile_optimizer import load_weights_override
 
 logger = get_logger("pipeline")
 
@@ -85,6 +86,8 @@ class RunSummary:
     execution: ExecutionSummary = field(default_factory=ExecutionSummary)
     limits: dict[str, tuple[int, int]] = field(default_factory=dict)
     export_path: Optional[str] = None
+    profile_source: str = "file"
+    weights_source: str = "config"
 
 
 class TargetingPipeline:
@@ -104,7 +107,9 @@ class TargetingPipeline:
         self.run_id = run_id
         self.profile = profile or load_profile(config.profile_path, conn)
         self.analyzer = ContentAnalyzer(config, self.profile)
-        self.scorer = TargetScorer(config, self.profile)
+        # 학습으로 조정된 가중치가 있으면 그것을 사용한다(app_state.scoring_weights).
+        self.weights_override = load_weights_override(conn)
+        self.scorer = TargetScorer(config, self.profile, self.weights_override)
         self.comment_generator = CommentGenerator(config, self.profile, seed=seed)
         self.tz_offset = int(config.get("actions.daily_limits.timezone_offset_hours", 9))
         self.date = today_str(self.tz_offset)
@@ -113,6 +118,8 @@ class TargetingPipeline:
             dry_run=config.dry_run,
             executor=config.executor_mode,
             analyzer=self.analyzer.active_name,
+            profile_source="db(학습 반영)" if self.profile.source == "db" else "file",
+            weights_source=self.scorer.weights_source,
         )
 
     # --- Phase 2: Discovery ---------------------------------------------
@@ -358,6 +365,7 @@ def format_summary(summary: RunSummary, config: Config) -> str:
         f" Run ID      : {summary.run_id}",
         f" Executor    : {summary.executor} (dry_run={summary.dry_run})",
         f" Analyzer    : {summary.analyzer}",
+        f" Profile     : {summary.profile_source} (가중치 {summary.weights_source})",
         "",
         " Discovery",
         f"   Found     : {summary.discovery.found}",

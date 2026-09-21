@@ -42,6 +42,11 @@ run_targeting.bat
 | `run_targeting.bat --list-pending` | 확인 대기 중인 Action 목록 |
 | `run_targeting.bat --confirm all` | 직접 처리한 Action을 기록(`--confirm 12,13`도 가능) |
 | `run_targeting.bat --skip 14` | 처리하지 않기로 한 Action 취소 |
+| `run_targeting.bat --feedback GOOD_TARGET --target SAMPLE001` | Feedback 기록 |
+| `run_targeting.bat --learn` | Feedback 기반 조정 제안 확인 |
+| `run_targeting.bat --learn-apply` | 제안을 실제로 반영 |
+| `run_targeting.bat --learn-reset` | 학습 반영 내용 초기화 |
+| `run_targeting.bat --rescore` | 점수 미달로 제외된 후보를 재채점 대상으로 복귀 |
 
 Python으로 직접 실행하려면 프로젝트 루트에서:
 
@@ -167,7 +172,46 @@ run_targeting.bat --skip 14        :: 안 한 건은 취소
 확인 대기 건도 일일 한도 계산에 포함되어, 한도를 넘는 목록이 만들어지지 않는다.
 Dry Run(기본)에서는 지금까지처럼 시뮬레이션으로 SUCCESS 처리된다.
 
-## 10. 안전 원칙
+## 10. Feedback 학습 (Phase 10)
+
+Machine Learning 모델은 쓰지 않는다. Feedback을 모아 **Profile 키워드와 Score 가중치 조정안**을
+계산하고, 운영자가 승인할 때만 반영한다.
+
+### Feedback 기록
+
+```bat
+run_targeting.bat --feedback GOOD_TARGET  --target SAMPLE001      :: media_id
+run_targeting.bat --feedback NOT_MY_STYLE --target 12 --note "이유"  :: Action ID
+run_targeting.bat --feedback RESPONDED    --target @username       :: Creator
+```
+
+타입: `GOOD_TARGET`, `BAD_TARGET`, `NOT_MY_STYLE`, `GOOD_COMMENT`, `BAD_COMMENT`,
+`LIKED`, `COMMENTED`, `RESPONDED`, `FOLLOWED`
+(`LIKED`/`COMMENTED`는 실행 시 자동으로 기록된다.)
+
+### 반영
+
+```bat
+run_targeting.bat --learn         :: 제안만 확인
+run_targeting.bat --learn-apply   :: 반영(app_state에 override 저장)
+run_targeting.bat --rescore       :: 기존에 제외된 후보를 다시 평가 대상으로
+run_targeting.bat --learn-reset   :: 되돌리기
+```
+
+동작 규칙:
+
+- **config.yaml과 profile 파일은 자동으로 수정하지 않는다.** 학습 결과는 DB(`app_state`)
+  override로만 저장되고 `--learn-reset`으로 언제든 되돌릴 수 있다.
+- 학습 신호는 **해시태그**만 사용한다(캡션 토큰은 '보는', '오늘도' 같은 어미가 섞여 부적합).
+- 키워드가 Profile에 추가되려면 `min_feedback_samples`, `min_keyword_occurrences`,
+  **서로 다른 게시물 `min_keyword_media`개 이상**을 모두 만족해야 한다.
+- **운영자가 선언한 Profile 키워드는 Feedback으로 뒤집지 않는다.** 부정 신호가 쌓이면
+  회피 목록에 넣는 대신 "확인 필요"로 보고한다(변형 형태 `카페에서`도 동일하게 보호).
+- 반영 시 Profile version이 올라가 분석/점수 캐시가 무효화된다 →
+  이후 실행에서 새 기준으로 다시 계산된다. 이미 처리된 후보는 `--rescore`로 되돌려야 다시 평가된다.
+- `learning.profile_update_interval_days`(기본 7) 이내 재반영은 건너뛴다.
+
+## 11. 안전 원칙
 
 - 기본값은 Dry Run이며, 실제 자동 좋아요/댓글을 수행하지 않는다.
 - Rate Limit은 **플랫폼 제한 우회가 아니라 운영자가 정한 내부 보수적 한도**다.
@@ -178,17 +222,17 @@ Dry Run(기본)에서는 지금까지처럼 시뮬레이션으로 SUCCESS 처리
   금지선을 지키면서 만들 수 있는 것이 사실상 없고, 제재 위험은 운영자 계정이 진다.
 - 플랫폼 경고/인증 요구가 감지되면 자동 실행을 즉시 중단한다.
 
-## 11. 테스트
+## 12. 테스트
 
 ```bash
 python -m pytest targeting_agent/tests -q
 ```
 
-## 12. 현재 구현 범위
+## 13. 현재 구현 범위
 
 | 상태 | 항목 |
 | --- | --- |
-| 구현 완료 | Config, SQLite, Logging, CSV/JSON/URL Import Discovery, 규칙 기반 분석, 유사도, Target Score, 댓글 생성/품질/중복 필터, Action Queue, Rate Limiter, ManualExecutor, Dry Run, Dashboard, Feedback 기록 |
+| 구현 완료 | Config, SQLite, Logging, CSV/JSON/URL Import Discovery, 규칙 기반 분석, 유사도, Target Score, 댓글 생성/품질/중복 필터, Action Queue, Rate Limiter, ManualExecutor, Dry Run + 수동 확인 흐름, Dashboard, Feedback 기록/학습 반영 |
 | 선택 사용 | Gemini 분석/댓글 생성(API Key 필요) |
 | 구현 완료(조건부) | HashtagDiscovery — 공식 API 토큰/권한 필요, Creator 미확인 제약 있음 |
 | 미지원 확인 | OfficialAPIExecutor 쓰기(공식 API에 해당 기능 없음) |

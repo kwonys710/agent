@@ -19,7 +19,13 @@ if __package__ in (None, ""):  # pragma: no cover - `python targeting_agent/main
     __package__ = "targeting_agent"
 
 from .core.config import Config, load_config
-from .core.database import get_connection, get_stats, init_db, today_str
+from .core.database import (
+    get_connection,
+    get_stats,
+    init_db,
+    reset_skipped_for_rescore,
+    today_str,
+)
 from .actions.confirm import (
     confirm_actions,
     format_awaiting,
@@ -27,8 +33,20 @@ from .actions.confirm import (
     parse_ids,
     skip_actions,
 )
+from .analysis.profile_analyzer import load_profile
 from .core.exceptions import TargetingError
 from .core.logger import get_logger, setup_logging
+from .core.models import FeedbackType
+from .learning.feedback import record_for_target, resolve_target
+from .learning.profile_optimizer import (
+    apply_learning,
+    format_suggestions,
+    load_weights_override,
+    reset_learning,
+    should_update,
+    suggest_profile,
+    suggest_weights,
+)
 from .pipeline import TargetingPipeline, format_summary, next_run_id
 
 logger = get_logger("main")
@@ -62,6 +80,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dashboard", action="store_true", help="로컬 Dashboard 실행")
     parser.add_argument("--seed", type=int, default=None, help="댓글 생성 난수 seed(테스트용)")
+    parser.add_argument(
+        "--feedback",
+        metavar="TYPE",
+        default=None,
+        help="Feedback 기록: " + " | ".join(t.value for t in FeedbackType),
+    )
+    parser.add_argument(
+        "--target", metavar="ID", default=None, help="Feedback 대상: Action ID | @username | media_id"
+    )
+    parser.add_argument("--note", default="", help="Feedback 메모")
+    parser.add_argument("--learn", action="store_true", help="Feedback 기반 조정 제안 출력")
+    parser.add_argument("--learn-apply", action="store_true", help="조정 제안을 실제로 반영")
+    parser.add_argument("--learn-reset", action="store_true", help="학습 반영 내용 초기화")
+    parser.add_argument(
+        "--rescore",
+        action="store_true",
+        help="점수 미달로 제외된 후보를 다시 채점 대상으로 되돌린다(학습 반영 후 사용)",
+    )
     return parser
 
 
@@ -132,6 +168,73 @@ def run_confirmation(config: Config, args: argparse.Namespace) -> int:
         conn.close()
 
 
+def run_feedback(config: Config, args: argparse.Namespace) -> int:
+    """--feedback TYPE --target ID 처리."""
+    try:
+        feedback_type = FeedbackType(str(args.feedback).strip().upper())
+    except ValueError:
+        valid = ", ".join(t.value for t in FeedbackType)
+        print(f"[오류] 알 수 없는 Feedback 타입입니다. 사용 가능: {valid}", file=sys.stderr)
+        return 2
+
+    conn = get_connection(config.db_path)
+    try:
+        init_db(conn)
+        try:
+            target = resolve_target(conn, str(args.target or ""))
+        except ValueError as exc:
+            print(f"[오류] {exc}", file=sys.stderr)
+            return 2
+        record_for_target(conn, feedback_type, target, note=args.note)
+        conn.commit()
+        print(f"Feedback 기록: {feedback_type.value} → {target.label}")
+        return 0
+    finally:
+        conn.close()
+
+
+def run_learning(config: Config, args: argparse.Namespace) -> int:
+    """--learn / --learn-apply / --learn-reset 처리."""
+    conn = get_connection(config.db_path)
+    try:
+        init_db(conn)
+        if args.learn_reset:
+            reset_learning(conn)
+            print("학습 반영 내용을 초기화했습니다(config.yaml / profile 파일 기준으로 복귀).")
+            return 0
+
+        profile = load_profile(config.profile_path, conn)
+        min_samples = int(config.get("learning.min_feedback_samples", 10))
+        profile_suggestion = suggest_profile(
+            conn,
+            profile,
+            min_samples=min_samples,
+            min_occurrences=int(config.get("learning.min_keyword_occurrences", 3)),
+            min_score=float(config.get("learning.min_keyword_score", 2.0)),
+            min_media=int(config.get("learning.min_keyword_media", 2)),
+        )
+        current_weights = load_weights_override(conn) or {
+            k: float(v) for k, v in config.section("scoring.weights").items()
+        }
+        weight_suggestion = suggest_weights(conn, current_weights, min_samples=min_samples)
+
+        applied = None
+        if args.learn_apply:
+            interval = int(config.get("learning.profile_update_interval_days", 0))
+            if not should_update(conn, interval):
+                print(
+                    f"[알림] 마지막 반영 이후 {interval}일이 지나지 않아 건너뜁니다 "
+                    "(learning.profile_update_interval_days)."
+                )
+                return 0
+            applied = apply_learning(conn, profile, profile_suggestion, weight_suggestion)
+
+        print(format_suggestions(profile_suggestion, weight_suggestion, applied=applied))
+        return 0
+    finally:
+        conn.close()
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -156,6 +259,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         serve(config)
         return 0
+
+    if args.rescore:
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            count = reset_skipped_for_rescore(conn)
+            print(f"재채점 대상으로 되돌린 후보: {count}건 (다음 실행에서 다시 평가됩니다)")
+            return 0
+        finally:
+            conn.close()
+
+    if args.feedback is not None:
+        return run_feedback(config, args)
+
+    if args.learn or args.learn_apply or args.learn_reset:
+        return run_learning(config, args)
 
     if args.list_pending or args.confirm is not None or args.skip is not None:
         return run_confirmation(config, args)

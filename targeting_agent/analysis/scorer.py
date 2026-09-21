@@ -82,10 +82,21 @@ def novelty_score(last_interacted_at: Any, *, cooldown_days: int = 7) -> float:
 class TargetScorer:
     """config + profile 기반 Target Score 계산기."""
 
-    def __init__(self, config: Config, profile: TargetProfile) -> None:
+    def __init__(
+        self,
+        config: Config,
+        profile: TargetProfile,
+        weights_override: Optional[Mapping[str, float]] = None,
+    ) -> None:
         self.config = config
         self.profile = profile
-        self.weights = {k: float(v) for k, v in config.section("scoring.weights").items()}
+        # 학습 결과로 조정된 가중치가 있으면 그것을 우선 사용한다(app_state.scoring_weights).
+        base = config.section("scoring.weights")
+        self.weights = {
+            k: float(weights_override[k]) if weights_override and k in weights_override else float(v)
+            for k, v in base.items()
+        }
+        self.weights_source = "learned" if weights_override else "config"
         self.languages = [str(l) for l in config.list_of("discovery.languages")]
         self.min_followers = int(config.get("discovery.creator.min_followers", 0))
         self.max_followers = int(config.get("discovery.creator.max_followers", 10**9))

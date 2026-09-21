@@ -141,6 +141,12 @@ learning:
     - responded
     - followed_after_interaction
   profile_update_interval_days: 7
+  # 학습 결과는 config.yaml이 아니라 DB(app_state)에 override로 저장된다.
+  # --learn 으로 제안 확인, --learn-apply 로 반영, --learn-reset 으로 초기화.
+  min_feedback_samples: 10      # 이 수 미만이면 아무 것도 바꾸지 않는다
+  min_keyword_occurrences: 3    # 키워드가 최소 몇 건의 Feedback에 등장해야 하는지
+  min_keyword_media: 2          # 서로 다른 게시물 몇 개에서 반복돼야 하는지
+  min_keyword_score: 2.0        # 키워드 신호 강도 임계값
 
 dashboard:
   enabled: true
