@@ -12,7 +12,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from .actions.controller import ActionController, ExecutionSummary
 from .actions.executors import create_executor
@@ -314,39 +314,9 @@ class TargetingPipeline:
         stats: CommentStats,
     ) -> tuple[Optional[int], Optional[str]]:
         """댓글 후보를 생성/저장하고 선택된 댓글을 반환한다."""
-        candidates = self.comment_generator.generate(media, analysis, duplicate_filter)
-        stats.posts += 1
-
-        selected_id: Optional[int] = None
-        selected_text: Optional[str] = None
-        accepted = 0
-        for candidate in candidates:
-            draft_id = save_comment_draft(
-                self.conn,
-                int(media["media_pk"]),
-                candidate.text,
-                candidate.text.strip().lower(),
-                language=str(self.config.get("comments.language", "ko")),
-                quality_ok=candidate.quality_ok,
-                quality_reason=candidate.quality_reason,
-                similarity_max=candidate.similarity_max,
-                status=candidate.status.value,
-                generator=candidate.generator,
-                generator_version=candidate.generator_version,
-            )
-            if candidate.quality_ok:
-                accepted += 1
-                if candidate.status is DraftStatus.SELECTED and selected_text is None:
-                    selected_id, selected_text = draft_id, candidate.text
-            elif candidate.quality_reason.startswith("duplicate"):
-                stats.rejected_duplicate += 1
-            else:
-                stats.rejected_quality += 1
-
-        stats.generated += accepted
-        if accepted == 0:
-            stats.none_generated += 1
-        return selected_id, selected_text
+        return persist_comment_candidates(
+            self.conn, self.config, self.comment_generator, media, analysis, duplicate_filter, stats
+        )
 
     # --- Phase 5~6: 실행 -------------------------------------------------
     def execute(self) -> ExecutionSummary:
@@ -377,6 +347,175 @@ class TargetingPipeline:
         self.analyze_and_score()
         self.execute()
         return self.summary
+
+
+def persist_comment_candidates(
+    conn: sqlite3.Connection,
+    config: Config,
+    generator: CommentGenerator,
+    media: Mapping[str, Any],
+    analysis: Any,
+    duplicate_filter: CommentDuplicateFilter,
+    stats: CommentStats,
+) -> tuple[Optional[int], Optional[str]]:
+    """댓글 후보를 생성·저장하고 선택된 댓글을 반환한다(파이프라인/Dashboard 공용)."""
+    candidates = generator.generate(media, analysis, duplicate_filter)
+    stats.posts += 1
+
+    selected_id: Optional[int] = None
+    selected_text: Optional[str] = None
+    accepted = 0
+    for candidate in candidates:
+        draft_id = save_comment_draft(
+            conn,
+            int(media["media_pk"]),
+            candidate.text,
+            candidate.text.strip().lower(),
+            language=str(config.get("comments.language", "ko")),
+            quality_ok=candidate.quality_ok,
+            quality_reason=candidate.quality_reason,
+            similarity_max=candidate.similarity_max,
+            status=candidate.status.value,
+            generator=candidate.generator,
+            generator_version=candidate.generator_version,
+        )
+        if candidate.quality_ok:
+            accepted += 1
+            if candidate.status is DraftStatus.SELECTED and selected_text is None:
+                selected_id, selected_text = draft_id, candidate.text
+        elif candidate.quality_reason.startswith("duplicate"):
+            stats.rejected_duplicate += 1
+        else:
+            stats.rejected_quality += 1
+
+    stats.generated += accepted
+    if accepted == 0:
+        stats.none_generated += 1
+    return selected_id, selected_text
+
+
+@dataclass
+class ProcessResult:
+    """후보 1건 처리 결과(Dashboard 표시용)."""
+
+    status: str  # ANALYZED | FALLBACK_ANALYZED | NEEDS_ENRICHMENT | ERROR
+    media_pk: int
+    target_score: Optional[float] = None
+    analysis_source: str = "heuristic"   # claude | cache | heuristic
+    comment_count: int = 0
+    detail: str = ""
+
+    @property
+    def analyzed(self) -> bool:
+        return self.status in ("ANALYZED", "FALLBACK_ANALYZED")
+
+
+class CandidateProcessor:
+    """후보 1건을 분석·채점·댓글 생성까지 처리한다(Phase 12B).
+
+    Dashboard의 '추가 후 분석'이 호출한다. Action Queue는 만들지 않는다 —
+    승인은 Review 화면에서 운영자가 명시적으로 한다(Approval Gate 유지).
+
+    Claude는 다음 순서를 모두 통과할 때만 호출된다.
+    분석 가능한 입력 → AI 캐시 없음 → 실행/일일 한도 여유 → CLI 사용 가능
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        conn: sqlite3.Connection,
+        *,
+        profile: Optional[TargetProfile] = None,
+        intelligence: Optional[ClaudeIntelligence] = None,
+        seed: Optional[int] = None,
+    ) -> None:
+        self.config = config
+        self.conn = conn
+        self.profile = profile or load_profile(config.profile_path, conn)
+        self.analyzer = ContentAnalyzer(config, self.profile)
+        self.scorer = TargetScorer(config, self.profile, load_weights_override(conn))
+        self.comment_generator = CommentGenerator(config, self.profile, seed=seed)
+        self.intelligence = intelligence or ClaudeIntelligence(config, self.profile)
+
+    def process(self, media_pk: int) -> ProcessResult:
+        """저장된 후보 1건을 분석한다. 실패해도 예외를 밖으로 내보내지 않는다."""
+        row = self.conn.execute(
+            "SELECT m.*, c.username, c.followers, c.is_private, c.last_interacted_at "
+            "FROM candidate_media m JOIN creators c ON c.creator_id = m.creator_id "
+            "WHERE m.media_pk = ?",
+            (media_pk,),
+        ).fetchone()
+        if row is None:
+            return ProcessResult(status="ERROR", media_pk=media_pk, detail="후보를 찾을 수 없습니다.")
+
+        media = dict(row)
+        hashtags = media.get("hashtags")
+        has_text = bool(str(media.get("caption") or "").strip()) or bool(
+            hashtags and hashtags not in ("[]", "null")
+        )
+        if not has_text:
+            # URL만 있는 후보는 분석할 내용이 없다. Claude에 URL만 보내지 않는다.
+            update_candidate_status(
+                self.conn, media_pk, MediaStatus.NEEDS_ENRICHMENT, "no_analyzable_text"
+            )
+            self.conn.commit()
+            return ProcessResult(
+                status="NEEDS_ENRICHMENT",
+                media_pk=media_pk,
+                detail="캡션/해시태그가 없어 분석할 수 없습니다.",
+            )
+
+        try:
+            analysis, _cached = self.analyzer.analyze_media(self.conn, media)
+            breakdown = self.scorer.score(media, analysis)
+            source = "heuristic"
+
+            intel = self.intelligence.analyze(self.conn, media, force=True)
+            if intel.ok and intel.analysis is not None:
+                analysis = merge_claude_analysis(analysis, intel.analysis)
+                breakdown = self.scorer.score(media, analysis)
+                source = intel.source  # claude | cache
+
+            persist_score(self.conn, media_pk, analysis, breakdown)
+
+            reason = disqualify_reason(self.config, media, analysis, breakdown)
+            if reason:
+                update_candidate_status(
+                    self.conn, media_pk, MediaStatus.BLOCKED, reason, breakdown.total
+                )
+                self.conn.commit()
+                return ProcessResult(
+                    status="ANALYZED", media_pk=media_pk, target_score=breakdown.total,
+                    analysis_source=source, detail=f"제외 사유: {reason}",
+                )
+
+            stats = CommentStats()
+            if bool(self.config.get("comments.enabled", True)):
+                persist_comment_candidates(
+                    self.conn,
+                    self.config,
+                    self.comment_generator,
+                    media,
+                    analysis,
+                    CommentDuplicateFilter.from_db(self.config, self.conn),
+                    stats,
+                )
+            update_candidate_status(
+                self.conn, media_pk, MediaStatus.SCORED, "dashboard_analyzed", breakdown.total
+            )
+            self.conn.commit()
+        except Exception as exc:  # noqa: BLE001 - Dashboard가 죽지 않도록 격리
+            logger.exception("후보 처리 실패: media_pk=%s", media_pk)
+            self.conn.rollback()
+            return ProcessResult(status="ERROR", media_pk=media_pk, detail=str(exc)[:200])
+
+        return ProcessResult(
+            status="ANALYZED" if source in ("claude", "cache") else "FALLBACK_ANALYZED",
+            media_pk=media_pk,
+            target_score=breakdown.total,
+            analysis_source=source,
+            comment_count=stats.generated,
+        )
 
 
 def next_run_id(conn: sqlite3.Connection) -> str:

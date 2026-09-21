@@ -47,6 +47,7 @@ class ImportResult:
     error_message: Optional[str] = None
     source_file: Optional[str] = None
     source_row: Optional[int] = None
+    note: str = ""
 
 
 @dataclass
@@ -129,6 +130,7 @@ class CandidateIngestor:
                 error_message=str(exc),
                 source_file=source_file,
                 source_row=source_row,
+                note=note,
             )
             self._persist_event(item, source)
             logger.warning("입력 거부(%s): %s", raw_url, exc)
@@ -139,6 +141,7 @@ class CandidateIngestor:
         return self.add_candidate(
             candidate,
             original_url=raw_url,
+            note=note,
             source=source,
             source_file=source_file,
             source_row=source_row,
@@ -150,6 +153,7 @@ class CandidateIngestor:
         candidate: RawCandidate,
         *,
         original_url: str = "",
+        note: str = "",
         source: Optional[str] = None,
         source_file: Optional[str] = None,
         source_row: Optional[int] = None,
@@ -168,6 +172,7 @@ class CandidateIngestor:
                     canonical_url=candidate.canonical_url,
                     source_file=source_file,
                     source_row=source_row,
+                    note=note or candidate.note,
                 )
             else:
                 item = ImportResult(
@@ -177,6 +182,7 @@ class CandidateIngestor:
                     media_pk=media_pk,
                     source_file=source_file,
                     source_row=source_row,
+                    note=note or candidate.note,
                 )
                 if summary is not None and status is MediaStatus.NEEDS_ENRICHMENT:
                     summary.needs_enrichment += 1
@@ -217,6 +223,7 @@ class CandidateIngestor:
                     source_file=item.source_file,
                     source_row=item.source_row,
                     error_message=item.error_message,
+                    note=item.note,
                 )
         except sqlite3.Error:  # pragma: no cover - 기록 실패가 입력을 막지 않게 한다
             logger.warning("import_events 기록 실패(입력 처리는 계속): %s", item.original_url)

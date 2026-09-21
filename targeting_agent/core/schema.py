@@ -8,6 +8,8 @@
 - comment_drafts(media_pk, normalized_text) UNIQUE (동일 댓글 중복 저장 차단)
 - candidate_media.canonical_url UNIQUE (URL 입력 시 동일 게시물 중복 차단)
 
+v5(Phase 12B): import_events.note — 입력 시 남긴 메모(후보 테이블은 건드리지 않는다).
+
 v4(Phase 14): action_queue.approved_at — Dashboard에서 운영자가 승인한 시각.
 실행 상태(status)와 분리해 두어야 Phase 9의 '확인 대기(APPROVED)' 의미와 충돌하지 않는다.
 
@@ -18,7 +20,7 @@ import_events 테이블 추가. 기존 DB는 core/database.py의 마이그레이
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -79,6 +81,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         canonical_url TEXT,
         result TEXT NOT NULL,
         error_message TEXT,
+        note TEXT,
         imported_at TEXT NOT NULL
     )
     """,

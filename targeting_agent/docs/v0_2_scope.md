@@ -23,7 +23,12 @@
 
 우선순위 순. 각 Phase는 독립적으로 완료·릴리스 가능해야 한다.
 
-### Phase 11A — Meta API Feasibility Spike (선행, 코드 최소)
+> **방향 변경(2026-09-21)**: Meta API 기반 Discovery(Phase 11A/11B)는 **필수 경로에서 제외**한다.
+> Meta Developer App / Access Token / 공식 API Discovery 없이도 운영 가능한 구조를 기본으로 한다.
+> 기본 후보 입력은 ① Dashboard URL 입력 ② CLI `--add` ③ `data/inbox/*.csv` 세 가지다.
+> 아래 11A/11B는 **Optional / Future**로 남긴다(이미 조사·Probe는 완료됨).
+
+### (Optional) Phase 11A — Meta API Feasibility Spike
 
 대규모 구현 전에 **실제 계정 + 실제 응답**으로 가능 여부를 확정한다.
 결과: `docs/phase11a_meta_api_spike.md`, Probe: `scripts/probe_meta_api.py`.
@@ -35,7 +40,7 @@
 - 판정: GO / LIMITED GO / NO-GO
 - 현재 상태: **LIMITED GO(잠정)** — 문서 기준 검증 완료, 실계정 Probe 1회 실행 후 확정
 
-### Phase 11B — Commenter Discovery (11A가 GO/LIMITED GO일 때만)
+### (Optional) Phase 11B — Commenter Discovery
 
 11A 결과에 따라 범위를 정한다. **Discovery와 Enrichment를 분리한다.**
 
@@ -62,9 +67,16 @@
 
 완료 기준: 휴대폰에서 본 릴스를 링크 복사 → 한 줄 명령으로 후보 등록.
 
-### Phase 12B — Candidate Input UX 보강 (후순위)
+### Phase 12B — Dashboard Candidate Input + 즉시 처리 (완료)
 
-일괄 등록, 중복 안내, 입력 이력 확인 등. 12A 운영 경험 후 착수.
+VS Code/PowerShell 없이 Dashboard에서 후보를 넣고 바로 처리한다.
+
+- Review 화면 상단에 **새 Candidate 추가** 영역(URL 필수, username·caption·note 선택)
+- `[추가만]` — 저장만 하고 Claude를 호출하지 않는다
+- `[추가 후 분석]` — 분석 가능한 입력일 때만 기존 Intelligence 계층을 호출한다
+  (캐시 → 한도 → Claude → 실패 시 heuristic)
+- URL 검증·정규화·중복 판정은 Phase 12A Ingestion을 그대로 재사용, source는 `dashboard_manual`
+- 분석해도 Action은 자동 승인하지 않는다(Phase 14.1 Approval Gate 유지)
 
 ### Phase 13 — AI Intelligence = Claude Code CLI (방향 변경, 완료)
 
@@ -166,19 +178,13 @@ ai:
 ## 7. 진행 순서 (확정)
 
 ```
-11A (Feasibility Spike)
-  → 12A (Candidate Input Fallback 기본 확보)
-  → 13  (Claude Code Runtime + Prompt Version + Cache + Heuristic fallback) ✔ 완료
-  → 14  (Dashboard Action UI) ✔ 완료
-  → 11B (11A가 GO/LIMITED GO일 때만 Commenter Discovery 구현)
-  → 16A (Response Tracking)
-  → 16B (Follow-back: 공식 지원 여부에 따라 자동 또는 수동)
+12A ✔ → 13 ✔ → 14 ✔ → 14.1 ✔ → 12B ✔ (지금까지 완료)
   → 15  (Schedule + Daily Summary HTML)
-  → 12B (Candidate Input UX 보강)
+  → 16A (Response Tracking) / Learning·운영 안정화
 ```
 
-- **11A가 NO-GO여도 v0.2 개발은 멈추지 않는다.** 12A가 입력 경로를 맡고 11B만 드롭된다.
-- 13은 API Key 유무와 무관하게 착수 가능(Key 없으면 Adapter/Fallback까지 구현).
+- Meta API(11A/11B)는 Optional이며 이 진행 순서를 막지 않는다.
+- 후보 입력은 Dashboard URL / CLI `--add` / inbox CSV 세 경로로 충족된다.
 
 ## 8. 릴리스 기준 (v0.2 Definition of Done)
 

@@ -54,6 +54,7 @@ NEW_COLUMNS_V2 = (
     ("candidate_media", "canonical_url", "TEXT"),
     ("candidate_media", "instagram_media_id", "TEXT"),
     ("action_queue", "approved_at", "TEXT"),  # v4(Phase 14)
+    ("import_events", "note", "TEXT"),        # v5(Phase 12B)
 )
 
 
@@ -213,12 +214,13 @@ def record_import_event(
     source_file: Optional[str] = None,
     source_row: Optional[int] = None,
     error_message: Optional[str] = None,
+    note: Optional[str] = None,
 ) -> int:
     """입력 1건의 처리 결과를 남긴다(ADDED/DUPLICATE/INVALID/ERROR)."""
     cursor = conn.execute(
         "INSERT INTO import_events (media_pk, source, source_file, source_row, "
-        "original_url, canonical_url, result, error_message, imported_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "original_url, canonical_url, result, error_message, note, imported_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             media_pk,
             source,
@@ -228,6 +230,7 @@ def record_import_event(
             canonical_url,
             result,
             error_message,
+            note or None,
             utc_now(),
         ),
     )

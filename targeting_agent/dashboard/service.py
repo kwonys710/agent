@@ -10,18 +10,43 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from ..analysis.similarity import normalize_text
 from ..core.config import Config
 from ..core.database import enqueue_action, transaction, update_candidate_status, utc_now
 from ..core.logger import get_logger
 from ..core.models import ActionStatus, ActionType, DraftStatus, FeedbackType, MediaStatus
+from ..discovery.ingest import ADDED, DUPLICATE, CandidateIngestor
 from ..learning.feedback import record_feedback
 
 logger = get_logger("dashboard.service")
 
 OPERATOR_GENERATOR = "operator"
+SOURCE_DASHBOARD = "dashboard_manual"
+
+# 비정상적으로 긴 입력 차단(해당 요청만 거부한다)
+MAX_URL_LENGTH = 500
+MAX_USERNAME_LENGTH = 100
+MAX_CAPTION_LENGTH = 2000
+MAX_NOTE_LENGTH = 500
+
+
+@dataclass
+class AddResult:
+    """Dashboard에서 후보를 추가한 결과."""
+
+    status: str          # ADDED | DUPLICATE | INVALID | NEEDS_ENRICHMENT | ANALYZED
+                         # | FALLBACK_ANALYZED | ERROR
+    message: str
+    media_pk: Optional[int] = None
+    target_score: Optional[float] = None
+    analysis_source: str = ""
+    comment_count: int = 0
+
+    @property
+    def reviewable(self) -> bool:
+        return self.media_pk is not None
 
 
 @dataclass
@@ -48,6 +73,126 @@ class DashboardService:
     def __init__(self, conn: sqlite3.Connection, config: Config) -> None:
         self.conn = conn
         self.config = config
+
+    # --- 후보 추가 (Phase 12B) --------------------------------------------
+    def add_candidate(
+        self,
+        url: str,
+        *,
+        username: str = "",
+        caption: str = "",
+        note: str = "",
+        analyze: bool = False,
+        processor_factory: Optional[Any] = None,
+    ) -> AddResult:
+        """Instagram URL로 후보를 등록하고, 요청한 경우에만 분석까지 진행한다.
+
+        URL 검증·정규화·중복 판정은 Phase 12A의 Ingestion을 그대로 재사용한다.
+        Instagram 페이지에 접근하지 않으며, URL에 없는 정보는 추측하지 않는다.
+        """
+        invalid = self._validate_lengths(url, username, caption, note)
+        if invalid:
+            return AddResult(status="INVALID", message=invalid)
+
+        item = CandidateIngestor(self.conn).add_url(
+            url.strip(),
+            username=username.strip() or None,
+            caption=caption.strip(),
+            note=note.strip(),
+            source=SOURCE_DASHBOARD,
+        )
+
+        if item.result not in (ADDED, DUPLICATE):
+            return AddResult(
+                status=item.result,
+                message=item.error_message or "후보를 추가하지 못했습니다.",
+            )
+
+        media_pk = item.media_pk
+        if media_pk is None and item.canonical_url:
+            row = self.conn.execute(
+                "SELECT media_pk FROM candidate_media WHERE canonical_url = ?",
+                (item.canonical_url,),
+            ).fetchone()
+            media_pk = int(row["media_pk"]) if row else None
+
+        if item.result == DUPLICATE and not analyze:
+            return AddResult(
+                status=DUPLICATE, message="이미 등록된 Candidate입니다.", media_pk=media_pk
+            )
+
+        base_message = (
+            "Candidate 추가 완료" if item.result == ADDED else "이미 등록된 Candidate입니다"
+        )
+        if not analyze:
+            status = self._status_of(media_pk)
+            if status == MediaStatus.NEEDS_ENRICHMENT.value:
+                return AddResult(
+                    status="NEEDS_ENRICHMENT",
+                    message=f"{base_message} — URL만 등록되어 분석할 정보가 없습니다.",
+                    media_pk=media_pk,
+                )
+            return AddResult(status=ADDED, message=base_message, media_pk=media_pk)
+
+        if media_pk is None:
+            return AddResult(status="ERROR", message="후보를 찾을 수 없습니다.")
+
+        processor = (processor_factory or self._default_processor)()
+        result = processor.process(media_pk)
+
+        if result.status == "NEEDS_ENRICHMENT":
+            return AddResult(
+                status="NEEDS_ENRICHMENT",
+                message=f"{base_message} — 분석할 정보가 없습니다(URL만 등록됨).",
+                media_pk=media_pk,
+            )
+        if result.status == "ERROR":
+            return AddResult(
+                status="ERROR", message=f"분석 실패: {result.detail}", media_pk=media_pk
+            )
+
+        source_label = {"claude": "Claude Runtime", "cache": "Cache Hit"}.get(
+            result.analysis_source, "Heuristic"
+        )
+        return AddResult(
+            status=result.status,
+            message=(
+                f"{base_message} · Target Score {result.target_score:.0f} · "
+                f"분석 {source_label} · 댓글 후보 {result.comment_count}개"
+            ),
+            media_pk=media_pk,
+            target_score=result.target_score,
+            analysis_source=result.analysis_source,
+            comment_count=result.comment_count,
+        )
+
+    def _default_processor(self) -> Any:
+        from ..pipeline import CandidateProcessor
+
+        return CandidateProcessor(self.config, self.conn)
+
+    def _status_of(self, media_pk: Optional[int]) -> str:
+        if media_pk is None:
+            return ""
+        row = self.conn.execute(
+            "SELECT status FROM candidate_media WHERE media_pk = ?", (media_pk,)
+        ).fetchone()
+        return str(row["status"]) if row else ""
+
+    @staticmethod
+    def _validate_lengths(url: str, username: str, caption: str, note: str) -> Optional[str]:
+        checks = (
+            ("URL", url, MAX_URL_LENGTH),
+            ("Username", username, MAX_USERNAME_LENGTH),
+            ("Caption", caption, MAX_CAPTION_LENGTH),
+            ("Note", note, MAX_NOTE_LENGTH),
+        )
+        if not (url or "").strip():
+            return "Instagram URL을 입력하세요."
+        for name, value, limit in checks:
+            if len(value or "") > limit:
+                return f"{name}이(가) 너무 깁니다(최대 {limit}자)."
+        return None
 
     # --- 댓글 -----------------------------------------------------------
     def select_comment(

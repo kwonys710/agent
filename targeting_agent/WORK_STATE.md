@@ -82,7 +82,18 @@ Phase 14.1 완료: Approval Gate Hardening
 - Dashboard Action Queue 탭: 승인 대기 / 실행 대기(승인됨) 구분
 - 기존 Safety(일일 한도/Creator cooldown/중복 Interaction)는 그대로 적용됨을 테스트로 고정
 
-차단: 실계정 Probe 결과 확정 전까지 Phase 11B 본 구현 시작 금지
+Phase 12B 완료: Dashboard Candidate Input + 즉시 처리
+- Review 상단 '새 Candidate 추가'(URL 필수 / username·caption·note 선택)
+- [추가만] = Claude 호출 0, [추가 후 분석] = 조건 충족 시에만 Intelligence 호출
+- pipeline.CandidateProcessor 신설(분석·채점·댓글까지, Action Queue는 만들지 않음)
+- URL 검증/정규화/중복은 Phase 12A Ingestion 재사용, source=dashboard_manual
+- import_events.note 추가(schema v5) — 후보 테이블은 변경 없음
+- 입력 길이 제한, POST 토큰, localhost 전용 유지
+
+방향 변경: Meta API(Phase 11A/11B)는 필수 경로에서 제외 → Optional/Future.
+후보 입력은 Dashboard URL / CLI --add / inbox CSV 세 경로로 충족.
+
+Next: Phase 15 (Scheduler + Daily Summary)
 
 Pending:
 - 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)

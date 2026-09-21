@@ -124,6 +124,33 @@ def _summary(conn: sqlite3.Connection, config: Config) -> str:
     return f'<div class="grid">{tiles}</div><p class="muted">기준일 {e(s["date"])} · 저장된 분석 결과만 표시합니다(Claude를 호출하지 않음).</p>'
 
 
+def _add_form(token: str) -> str:
+    """새 Candidate 추가 — URL 하나만 붙여넣으면 되도록 구성한다."""
+    return f"""
+<div class="card">
+  <h2 style="margin-top:0">새 Candidate 추가</h2>
+  <form method="post" action="/add">
+    <input type="hidden" name="token" value="{e(token)}">
+    <input type="text" name="url" placeholder="https://www.instagram.com/reel/XXXX/"
+           maxlength="500" autofocus>
+    <details style="margin:8px 0">
+      <summary class="muted">선택 정보 (username · caption · note)</summary>
+      <p class="muted" style="margin:6px 0 2px">
+        캡션이나 username을 넣으면 바로 분석할 수 있습니다. 비워 두면 정보 부족 상태로 등록됩니다.
+      </p>
+      <input type="text" name="username" placeholder="username (선택)" maxlength="100">
+      <input type="text" name="caption" placeholder="caption (선택)" maxlength="2000"
+             style="margin-top:6px">
+      <input type="text" name="note" placeholder="note (선택)" maxlength="500"
+             style="margin-top:6px">
+    </details>
+    <button class="p" type="submit" name="mode" value="analyze">추가 후 분석</button>
+    <button type="submit" name="mode" value="add">추가만</button>
+  </form>
+</div>
+"""
+
+
 def _filter_form(filters: dict[str, str]) -> str:
     def options(name: str, values: Sequence[tuple[str, str]]) -> str:
         current = filters.get(name, "")
@@ -351,7 +378,7 @@ def render(conn: sqlite3.Connection, config: Config, page: Page, token: str) -> 
             + _detail(conn, config, page.media_pk, token)
         )
     else:
-        body = _filter_form(filters) + _candidate_cards(conn, filters)
+        body = _add_form(token) + _filter_form(filters) + _candidate_cards(conn, filters)
 
     notice = f'<div class="notice">{e(page.message)}</div>' if page.message else ""
     return (
@@ -417,17 +444,35 @@ def serve(config: Config) -> None:
             if form.get("token") != token:
                 self.send_error(403, "invalid token")
                 return
-            media_pk = int(form.get("media", "0") or 0)
-            if not media_pk:
-                self.send_error(400, "media required")
-                return
 
+            path = urllib.parse.urlparse(self.path).path
             conn = open_conn()
             try:
-                message = self._handle(conn, urllib.parse.urlparse(self.path).path, media_pk, form)
+                if path == "/add":
+                    result = DashboardService(conn, config).add_candidate(
+                        form.get("url", ""),
+                        username=form.get("username", ""),
+                        caption=form.get("caption", ""),
+                        note=form.get("note", ""),
+                        analyze=form.get("mode") == "analyze",
+                    )
+                    query = f"tab=review&msg={urllib.parse.quote(result.message)}"
+                    if result.reviewable:
+                        query += f"&media={result.media_pk}"
+                    self._redirect(f"/?{query}")
+                    return
+
+                media_pk = int(form.get("media", "0") or 0)
+                if not media_pk:
+                    self.send_error(400, "media required")
+                    return
+                message = self._handle(conn, path, media_pk, form)
             finally:
                 conn.close()
             target = f"/?tab=review&media={media_pk}&msg={urllib.parse.quote(message)}"
+            self._redirect(target)
+
+        def _redirect(self, target: str) -> None:
             self.send_response(303)
             self.send_header("Location", target)
             self.end_headers()

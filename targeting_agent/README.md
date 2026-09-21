@@ -197,9 +197,27 @@ run_targeting_dashboard.bat
 
 | Tab | 내용 |
 | --- | --- |
-| Review | 상단 요약(오늘 발견/분석/검토 대기/승인/Skip, LIKE·COMMENT 한도, Claude 호출) + 후보 목록(점수 내림차순, 상태·소스·분석방식·점수 필터) + 상세 |
+| Review | **새 Candidate 추가**(URL 붙여넣기 → `추가 후 분석`) + 상단 요약(오늘 발견/분석/검토 대기/승인/Skip, LIKE·COMMENT 한도, Claude 호출) + 후보 목록(점수 내림차순, 상태·소스·분석방식·점수 필터) + 상세 |
 | Action Queue | Creator / Action / Comment / Score / Created / Approved / Status |
 | Feedback / Stats | Feedback 누적과 최근 입력 내역 |
+
+### 8-0. Dashboard에서 후보 추가 (Phase 12B)
+
+```
+Instagram URL  [ https://www.instagram.com/reel/ABC123/ ]
+▼ 선택 정보 (username · caption · note)
+[추가 후 분석]  [추가만]
+```
+
+- **`추가만`** — 저장만 한다. Claude를 호출하지 않는다.
+- **`추가 후 분석`** — 분석 가능한 입력일 때만 분석한다:
+  캐시 확인 → 일일/실행 한도 확인 → Claude 1회 → 실패 시 heuristic fallback →
+  Target Score → 댓글 후보 → Review로 이동
+- URL만 넣으면 `NEEDS_ENRICHMENT`(정보 부족)로 저장된다. **URL만 Claude에 보내지 않는다.**
+  username·caption을 함께 넣으면 바로 분석된다.
+- 같은 URL을 여러 번 넣어도 후보는 1건이고, 같은 입력은 Cache Hit으로 처리된다.
+- 페이지 로딩·새로고침·필터·카드 열기로는 **절대 Claude를 호출하지 않는다.**
+- Instagram 페이지에 접근하지 않는다(스크래핑·로그인·쿠키 없음). URL은 식별자일 뿐이다.
 
 상세 화면에서 할 수 있는 것:
 
