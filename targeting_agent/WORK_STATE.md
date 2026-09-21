@@ -34,6 +34,12 @@ Completed:
 Last Test:
 python -m pytest targeting_agent/tests -q  → 101 passed
 
+Next:
+- v0.2 범위 설계 완료 → docs/v0_2_scope.md
+  Phase 11(내 반응자 Discovery) → 13(AI 품질) → 14(Dashboard 조작)
+  → 16(결과 자동 추적) → 15(스케줄) → 12(입력 보강)
+  선행: 공식 문서로 댓글 작성자 필드/oEmbed/팔로워 조회 가능 여부 확인
+
 Pending:
 - 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)
 - Gemini 분석/댓글 생성 실사용 검증(API Key 필요)
