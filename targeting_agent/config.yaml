@@ -27,9 +27,14 @@ executor:
 
 discovery:
   enabled: true
-  default_source: "import"  # import(CSV/URL) | hashtag(공식 API 필요)
+  default_source: "import"  # import(CSV/URL) | hashtag(공식 API 권한 필요)
   import:
     path: "samples/candidates_sample.csv"
+  hashtag:
+    # 공식 Graph API Hashtag Search 사용(IG_ACCESS_TOKEN / IG_BUSINESS_ACCOUNT_ID 필요)
+    edge: "recent_media"      # recent_media(최근 24시간) | top_media
+    per_hashtag_limit: 25
+    max_hashtags_per_run: 5   # 7일 고유 해시태그 30개 한도를 나눠 쓰기 위한 실행당 제한
   hashtags:
     - 직장인
     - 직장인브이로그
@@ -120,6 +125,9 @@ safety:
   skip_ads: true
   skip_sensitive_content: true
   skip_if_already_interacted: true
+  # 해시태그 검색 결과에는 username이 없어 Creator 한도를 적용할 수 없다.
+  # true면 Creator 미확인 후보는 Action을 만들지 않고 운영자 확인 대상으로만 남긴다.
+  skip_unresolved_creator: true
   block_duplicate_comments: true
   halt_on_platform_warning: true
 

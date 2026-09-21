@@ -1,14 +1,20 @@
-"""OfficialAPIExecutor — 공식 Instagram Graph API 기반 Executor (v0.1 제한).
+"""OfficialAPIExecutor — 공식 Instagram Graph API 기반 Executor.
 
-공식 API 확인 결과(Phase 8에서 재확인 필요):
-- Instagram Graph API는 **타인 게시물에 대한 좋아요 작성 엔드포인트를 제공하지 않는다.**
-- 댓글 작성 역시 일반적으로 **본인 소유 미디어의 댓글/답글**에 한정된다
-  (`POST /{ig-comment-id}/replies`, `POST /{ig-media-id}/comments`는 본인 미디어 기준).
-- 따라서 "다른 Creator의 Reel에 좋아요/댓글"은 현재 공식 API로 구현할 수 없다.
+Phase 8 공식 문서 확인 결과:
+- 공식 API는 **타인 게시물에 대한 좋아요/댓글 작성을 제공하지 않는다.**
+  공개 댓글 작성 엔드포인트는 제거되었고, 이후 추가된 engagement 관련 기능도
+  본인 소유 콘텐츠(내 게시물/내 게시물의 댓글) 기준으로 안내된다.
+- 따라서 "다른 Creator의 Reel에 좋아요/댓글"이라는 이 프로젝트의 목적은
+  공식 API로 구현할 수 없다. 이 Executor는 그 사실을 코드로 고정하고,
+  잘못된 자동 실행을 막는 역할을 한다.
 
-이 Executor는 그 사실을 코드로 명시하고, 잘못된 자동 실행을 막는 역할을 한다.
+공식 API로 실제 수행하는 일:
+- validate_session(): Access Token이 유효한지 IG User 노드 조회로 확인
+- health_check(): 사용 가능한 읽기 기능과 해시태그 조회 한도 사용량 보고
 """
 from __future__ import annotations
+
+from typing import Optional
 
 from ...core.logger import get_logger
 from ...core.models import ExecutionResult, QueuedAction
@@ -24,18 +30,29 @@ UNSUPPORTED = (
 
 
 class OfficialAPIExecutor(BaseExecutor):
-    """공식 API로 가능한 범위만 수행한다(v0.1에서는 실행 불가로 처리)."""
+    """공식 API로 가능한 범위만 수행한다(쓰기 동작 없음)."""
 
     name = "official_api"
     supports_like = False
     supports_comment = False
 
-    def __init__(self, dry_run: bool = True, client: InstagramGraphClient | None = None) -> None:
+    def __init__(
+        self, dry_run: bool = True, client: Optional[InstagramGraphClient] = None
+    ) -> None:
         super().__init__(dry_run=dry_run)
         self.client = client or InstagramGraphClient()
 
     def validate_session(self) -> bool:
-        return self.client.available()
+        """Credential 존재 여부 + 토큰 실제 동작 여부를 확인한다."""
+        if not self.client.available():
+            return False
+        if not self.client.validate_token():
+            logger.warning("Graph API Access Token이 유효하지 않습니다(재인증 필요).")
+            return False
+        logger.warning(
+            "공식 API 토큰은 유효하지만 쓰기 동작은 지원되지 않습니다. %s", UNSUPPORTED
+        )
+        return False  # 쓰기가 불가능하므로 Action 실행 자체를 시작하지 않는다
 
     def execute_like(self, action: QueuedAction) -> ExecutionResult:
         logger.warning("LIKE 미지원: %s", UNSUPPORTED)

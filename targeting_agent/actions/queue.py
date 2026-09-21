@@ -47,6 +47,22 @@ class ActionQueueBuilder:
         self.minimum_score = float(config.get("scoring.minimum_target_score", 70))
         self.executor = config.executor_mode
         self.dry_run = config.dry_run
+        self.skip_unresolved_creator = bool(config.get("safety.skip_unresolved_creator", True))
+
+    @staticmethod
+    def _is_unresolved(conn: sqlite3.Connection, media_row: Mapping[str, Any], creator_id: int) -> bool:
+        """Creator username이 미확인(unresolved:) 상태인지 확인한다.
+
+        media_row에 username이 없을 수도 있으므로(조회 쿼리에 따라 다름)
+        없으면 DB에서 직접 읽는다 — 안전장치가 조용히 꺼지지 않게 한다.
+        """
+        username = media_row.get("username")
+        if username is None:
+            row = conn.execute(
+                "SELECT username FROM creators WHERE creator_id = ?", (creator_id,)
+            ).fetchone()
+            username = row["username"] if row else ""
+        return str(username or "").startswith("unresolved:")
 
     def build(
         self,
@@ -61,6 +77,16 @@ class ActionQueueBuilder:
         media_pk = int(media_row["media_pk"])
         creator_id = int(media_row["creator_id"])
         priority = int(round(target_score))
+
+        # 해시태그 Discovery로 들어온 후보는 username을 알 수 없어 Creator 한도를
+        # 적용할 수 없다. 이런 후보는 Action 대상에서 제외하고 운영자 확인 대상으로 남긴다.
+        if self.skip_unresolved_creator and self._is_unresolved(conn, media_row, creator_id):
+            result.skipped += 1
+            result._note("creator_unresolved")
+            update_candidate_status(
+                conn, media_pk, MediaStatus.SKIPPED, "creator_unresolved", target_score
+            )
+            return result
 
         if target_score < self.minimum_score:
             result.skipped += 1

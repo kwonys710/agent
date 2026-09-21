@@ -170,7 +170,17 @@ class TargetingPipeline:
 
         if source_name == "hashtag":
             hashtags = [str(h) for h in self.config.list_of("discovery.hashtags")]
-            return HashtagDiscovery(hashtags).discover(limit=max_candidates)
+            discovery = HashtagDiscovery(
+                hashtags,
+                edge=str(self.config.get("discovery.hashtag.edge", "recent_media")),
+                per_hashtag_limit=int(self.config.get("discovery.hashtag.per_hashtag_limit", 25)),
+                max_hashtags_per_run=int(
+                    self.config.get("discovery.hashtag.max_hashtags_per_run", 5)
+                ),
+                media_types=[str(t) for t in self.config.list_of("discovery.content_types")],
+                conn=self.conn,
+            )
+            return discovery.discover(limit=max_candidates)
 
         logger.warning("알 수 없는 discovery.default_source: %s", source_name)
         return []

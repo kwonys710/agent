@@ -164,3 +164,23 @@ def test_create_executor_factory(tmp_path) -> None:
     assert isinstance(create_executor("browser", export_dir=tmp_path, run_id="r", dry_run=True), BrowserExecutor)
     with pytest.raises(ConfigError):
         create_executor("unknown", export_dir=tmp_path, run_id="r", dry_run=True)
+
+
+def test_queue_skips_unresolved_creator(config, conn, sample_candidate) -> None:
+    """해시태그 Discovery 후보(Creator 미확인)는 Action을 만들지 않는다."""
+    from targeting_agent.core.models import RawCandidate
+
+    unresolved = RawCandidate(
+        media_id="H1", permalink="https://www.instagram.com/reel/H1/",
+        username="unresolved:H1", caption="퇴근길 #직장인", followers=0,
+    )
+    row = _media_row(conn, unresolved)
+    result = ActionQueueBuilder(config, run_id="r1").build(conn, row, 95.0, comment_text="퇴근 좋네요")
+
+    assert (result.likes, result.comments, result.skipped) == (0, 0, 1)
+    assert result.reasons == {"creator_unresolved": 1}
+    status = conn.execute(
+        "SELECT status, status_reason FROM candidate_media WHERE media_pk = ?", (row["media_pk"],)
+    ).fetchone()
+    assert status["status"] == MediaStatus.SKIPPED.value
+    assert status["status_reason"] == "creator_unresolved"

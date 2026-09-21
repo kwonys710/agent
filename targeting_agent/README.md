@@ -48,8 +48,9 @@ python -m targeting_agent.main
 
 ## 3. 후보(Candidate) 입력
 
-v0.1의 기본 Discovery는 **CSV/JSON/URL 목록 Import**다.
-(해시태그 자동 수집은 Instagram 공식 API 권한이 필요해 Phase 8에서 검토한다.)
+기본 Discovery는 **CSV/JSON/URL 목록 Import**다.
+해시태그 자동 수집(`discovery.default_source: hashtag`)은 공식 Graph API로 구현되어 있으나
+아래 8-2의 권한과 제약을 확인한 뒤 사용해야 한다.
 
 `targeting_agent/samples/candidates_sample.csv` 형식:
 
@@ -115,7 +116,38 @@ IG_BUSINESS_ACCOUNT_ID=
 | `targeting_agent/data/exports/manual_actions_<run_id>.csv` | 수동 처리용 Action 목록 |
 | `targeting_agent/data/logs/targeting_<날짜>.log` | 실행 로그(기본 30일 보관) |
 
-## 8. 안전 원칙
+## 8. Instagram 공식 API 지원 범위 (확인 결과)
+
+### 8-1. 읽기 — 지원
+| 항목 | 내용 |
+| --- | --- |
+| 엔드포인트 | `GET /ig_hashtag_search` → `GET /{hashtag-id}/top_media \| recent_media` |
+| 필요 조건 | Instagram Business/Creator 계정, `instagram_basic` + Instagram Public Content Access(앱 심사) |
+| 조회 한도 | **7일 동안 고유 해시태그 30개**, 페이지당 최대 50건 |
+| recent_media | **최근 24시간** 공개 게시물만 반환 |
+| 제약 | 반환 media 객체에 **`username` 필드를 요청할 수 없음** |
+
+`.env`에 `IG_ACCESS_TOKEN`, `IG_BUSINESS_ACCOUNT_ID`를 넣고
+`config.yaml`의 `discovery.default_source: hashtag`로 바꾸면 동작한다.
+7일 한도는 `app_state.hashtag_quota`에 기록해 로컬에서 **초과하지 않도록 중단**한다
+(우회 목적이 아니라 준수 목적).
+
+**username을 받을 수 없으므로** 해시태그로 들어온 후보는 `unresolved:<media_id>`로 저장되고,
+Creator 단위 한도/cooldown을 적용할 수 없다. 따라서 `safety.skip_unresolved_creator: true`(기본)
+설정에서는 분석·점수까지만 하고 **Action은 만들지 않는다.**
+운영자가 permalink를 열어 username을 확인한 뒤 CSV Import로 넣으면 정상 처리된다.
+
+### 8-2. 쓰기 — 미지원
+공식 API에는 **타인 게시물에 좋아요/댓글을 작성하는 엔드포인트가 없다.**
+공개 댓글 작성 엔드포인트는 제거되었고, 이후 추가된 engagement 기능도 본인 소유 콘텐츠 기준이다.
+그래서 `OfficialAPIExecutor`는 토큰 유효성만 확인하고 **어떤 쓰기도 수행하지 않는다**
+(`executor.mode: official_api`로 실행하면 세션 검증 단계에서 중단된다).
+→ 실제 좋아요/댓글은 `manual` 모드에서 운영자가 직접 처리한다.
+
+> 위 내용은 구현 시점(2026-09)에 확인한 범위다. Meta 정책은 자주 바뀌므로
+> 실제 토큰/권한을 받은 뒤 공식 문서로 한 번 더 확인할 것.
+
+## 9. 안전 원칙
 
 - 기본값은 Dry Run이며, 실제 자동 좋아요/댓글을 수행하지 않는다.
 - Rate Limit은 **플랫폼 제한 우회가 아니라 운영자가 정한 내부 보수적 한도**다.
@@ -124,18 +156,20 @@ IG_BUSINESS_ACCOUNT_ID=
 - 탐지 우회, CAPTCHA 우회, Challenge 우회, 자동화 위장 기능은 구현하지 않는다.
 - 플랫폼 경고/인증 요구가 감지되면 자동 실행을 즉시 중단한다.
 
-## 9. 테스트
+## 10. 테스트
 
 ```bash
 python -m pytest targeting_agent/tests -q
 ```
 
-## 10. 현재 구현 범위
+## 11. 현재 구현 범위
 
 | 상태 | 항목 |
 | --- | --- |
 | 구현 완료 | Config, SQLite, Logging, CSV/JSON/URL Import Discovery, 규칙 기반 분석, 유사도, Target Score, 댓글 생성/품질/중복 필터, Action Queue, Rate Limiter, ManualExecutor, Dry Run, Dashboard, Feedback 기록 |
 | 선택 사용 | Gemini 분석/댓글 생성(API Key 필요) |
-| Stub | HashtagDiscovery, OfficialAPIExecutor, BrowserExecutor |
+| 구현 완료(조건부) | HashtagDiscovery — 공식 API 토큰/권한 필요, Creator 미확인 제약 있음 |
+| 미지원 확인 | OfficialAPIExecutor 쓰기(공식 API에 해당 기능 없음) |
+| Stub | BrowserExecutor (Phase 9 검토) |
 
 자세한 진행 상태는 `WORK_STATE.md` 참고.
