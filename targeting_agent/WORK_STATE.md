@@ -63,6 +63,16 @@ Phase 13 완료 (방향 변경: Claude Code Runtime, LLM API SDK 미사용)
 - 댓글은 Claude 후보 우선, 부족하면 템플릿 보충. 품질·중복 필터는 동일 적용
 - Target Score는 Python이 계산하고 Claude는 content_similarity에만 반영
 
+Phase 14 완료: Dashboard Action UI (stdlib http.server 유지, 신규 의존성 없음)
+- dashboard/{queries,service,app}.py 로 조회·상태변경·UI 분리
+- Review / Action Queue / Feedback·Stats 3개 Tab
+- 댓글 선택 및 직접 수정(원본 보존, generator=operator), LIKE/COMMENT 승인,
+  Skip, 검토 대기로 되돌리기, Feedback 6종(중복 방지)
+- 승인은 status=PENDING + approved_at 기록.
+  Phase 9의 APPROVED(수동 처리 후 확인 대기)와 의미가 달라 컬럼으로 분리했다.
+- 127.0.0.1 전용(외부 바인딩 시 실행 거부), POST 토큰 확인
+- Dashboard는 Claude를 호출하지 않고 저장된 분석 결과만 표시한다
+
 차단: 실계정 Probe 결과 확정 전까지 Phase 11B 본 구현 시작 금지
 
 Pending:

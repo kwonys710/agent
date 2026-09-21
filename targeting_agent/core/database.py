@@ -53,6 +53,7 @@ def get_connection(db_path: Union[Path, str]) -> sqlite3.Connection:
 NEW_COLUMNS_V2 = (
     ("candidate_media", "canonical_url", "TEXT"),
     ("candidate_media", "instagram_media_id", "TEXT"),
+    ("action_queue", "approved_at", "TEXT"),  # v4(Phase 14)
 )
 
 

@@ -322,7 +322,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 2
         from .dashboard.app import serve
 
-        serve(config)
+        try:
+            serve(config)
+        except TargetingError as exc:
+            print(f"[오류] {exc}", file=sys.stderr)
+            return 2
         return 0
 
     if args.add:

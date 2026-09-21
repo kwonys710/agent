@@ -39,7 +39,8 @@ run_targeting.bat
 | `run_targeting.bat --import-only` | 후보 입력(inbox 포함)만 하고 분석·실행은 건너뜀 |
 | `run_targeting.bat --limit 5` | 이번 실행 최대 Action 수 |
 | `run_targeting.bat --stats` | 현재 DB 현황만 출력 |
-| `run_targeting.bat --dashboard` | 로컬 Dashboard(http://127.0.0.1:8501) |
+| `run_targeting_dashboard.bat` | 운영 Dashboard(http://127.0.0.1:8501) |
+| `run_targeting.bat --dashboard` | 위와 동일(파이썬 경로로 직접 실행) |
 | `run_targeting.bat --no-dry-run` | 실제 처리 대상 목록 생성(확인 대기 상태) |
 | `run_targeting.bat --list-pending` | 확인 대기 중인 Action 목록 |
 | `run_targeting.bat --confirm all` | 직접 처리한 Action을 기록(`--confirm 12,13`도 가능) |
@@ -186,7 +187,39 @@ LLM API Key는 필요 없다(Claude Code 로그인 상태를 사용).
 - 계정 ID/Password는 어디에도 저장하지 않는다.
 - `.env`와 `data/*.db`는 git에 올라가지 않는다(.gitignore).
 
-## 8. 실행 결과물
+## 8. 운영 Dashboard (Phase 14)
+
+```bat
+run_targeting_dashboard.bat
+```
+
+한 화면에서 후보 확인 → 분석 확인 → 댓글 선택/수정 → Action 승인 → Skip/Feedback까지 처리한다.
+
+| Tab | 내용 |
+| --- | --- |
+| Review | 상단 요약(오늘 발견/분석/검토 대기/승인/Skip, LIKE·COMMENT 한도, Claude 호출) + 후보 목록(점수 내림차순, 상태·소스·분석방식·점수 필터) + 상세 |
+| Action Queue | Creator / Action / Comment / Score / Created / Approved / Status |
+| Feedback / Stats | Feedback 누적과 최근 입력 내역 |
+
+상세 화면에서 할 수 있는 것:
+
+- 캡션·해시태그·요약·주제·분위기·언어, **relevance_score와 저장된 짧은 사유**, 점수 구성요소(막대)
+- `Instagram에서 열기`(새 탭). Dashboard는 Instagram에 로그인하거나 스크래핑하지 않는다
+- 댓글 후보 중 하나 선택, 또는 **직접 수정**(원본 후보는 보존되고 수정본은 `generator=operator`로 따로 저장)
+- `LIKE` / `COMMENT` / 둘 다 선택 후 **Action 승인** → Action Queue에 적재(`approved_at` 기록)
+- `Skip`, `검토 대기로 되돌리기`(이미 실행된 Interaction이 있으면 거부)
+- Feedback 6종: 좋은 Target / 관심 없음 / 좋은 댓글 / 나쁜 댓글 / 응답 있음 / 팔로우됨
+
+지키는 규칙:
+
+- **127.0.0.1 전용.** `0.0.0.0` 등 외부 바인딩은 실행을 거부한다
+- **Claude Runtime을 호출하지 않는다.** DB에 저장된 분석 결과만 표시하고, 분석 전 후보는 `분석 대기`로 보여준다
+- **Instagram 동작을 실행하지 않는다.** 실제 실행은 `run_targeting.bat`에서 한다
+- 같은 승인을 여러 번 눌러도 Queue가 중복 생성되지 않는다(DB UNIQUE + 멱등 처리)
+- 같은 Feedback 반복 클릭은 중복 저장하지 않는다
+- 일일 한도를 넘은 승인은 경고를 표시하며, 실행 시점 정책은 기존 Rate Limiter가 그대로 적용한다
+
+## 9. 실행 결과물
 
 | 경로 | 내용 |
 | --- | --- |
@@ -194,7 +227,7 @@ LLM API Key는 필요 없다(Claude Code 로그인 상태를 사용).
 | `targeting_agent/data/exports/manual_actions_<run_id>.csv` | 수동 처리용 Action 목록 |
 | `targeting_agent/data/logs/targeting_<날짜>.log` | 실행 로그(기본 30일 보관) |
 
-## 9. Instagram 공식 API 지원 범위 (확인 결과)
+## 10. Instagram 공식 API 지원 범위 (확인 결과)
 
 ### 8-1. 읽기 — 지원
 | 항목 | 내용 |
@@ -225,7 +258,7 @@ Creator 단위 한도/cooldown을 적용할 수 없다. 따라서 `safety.skip_u
 > 위 내용은 구현 시점(2026-09)에 확인한 범위다. Meta 정책은 자주 바뀌므로
 > 실제 토큰/권한을 받은 뒤 공식 문서로 한 번 더 확인할 것.
 
-## 10. 실제 처리 흐름 (manual 모드)
+## 11. 실제 처리 흐름 (manual 모드)
 
 `--no-dry-run`으로 실행해도 프로그램이 Instagram에 접속하지 않는다.
 대신 처리 목록을 만들고 Action을 **확인 대기(APPROVED)** 상태로 둔다.
@@ -242,7 +275,7 @@ run_targeting.bat --skip 14        :: 안 한 건은 취소
 확인 대기 건도 일일 한도 계산에 포함되어, 한도를 넘는 목록이 만들어지지 않는다.
 Dry Run(기본)에서는 지금까지처럼 시뮬레이션으로 SUCCESS 처리된다.
 
-## 11. Feedback 학습 (Phase 10)
+## 12. Feedback 학습 (Phase 10)
 
 Machine Learning 모델은 쓰지 않는다. Feedback을 모아 **Profile 키워드와 Score 가중치 조정안**을
 계산하고, 운영자가 승인할 때만 반영한다.
@@ -281,7 +314,7 @@ run_targeting.bat --learn-reset   :: 되돌리기
   이후 실행에서 새 기준으로 다시 계산된다. 이미 처리된 후보는 `--rescore`로 되돌려야 다시 평가된다.
 - `learning.profile_update_interval_days`(기본 7) 이내 재반영은 건너뛴다.
 
-## 12. 안전 원칙
+## 13. 안전 원칙
 
 - 기본값은 Dry Run이며, 실제 자동 좋아요/댓글을 수행하지 않는다.
 - Rate Limit은 **플랫폼 제한 우회가 아니라 운영자가 정한 내부 보수적 한도**다.
@@ -292,13 +325,13 @@ run_targeting.bat --learn-reset   :: 되돌리기
   금지선을 지키면서 만들 수 있는 것이 사실상 없고, 제재 위험은 운영자 계정이 진다.
 - 플랫폼 경고/인증 요구가 감지되면 자동 실행을 즉시 중단한다.
 
-## 13. 테스트
+## 14. 테스트
 
 ```bash
 python -m pytest targeting_agent/tests -q
 ```
 
-## 14. 현재 구현 범위
+## 15. 현재 구현 범위
 
 | 상태 | 항목 |
 | --- | --- |

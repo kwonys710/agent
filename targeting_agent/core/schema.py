@@ -8,6 +8,9 @@
 - comment_drafts(media_pk, normalized_text) UNIQUE (동일 댓글 중복 저장 차단)
 - candidate_media.canonical_url UNIQUE (URL 입력 시 동일 게시물 중복 차단)
 
+v4(Phase 14): action_queue.approved_at — Dashboard에서 운영자가 승인한 시각.
+실행 상태(status)와 분리해 두어야 Phase 9의 '확인 대기(APPROVED)' 의미와 충돌하지 않는다.
+
 v3(Phase 13): ai_analysis_cache 추가 — 동일 Candidate+Prompt+Model 재호출 차단.
 
 v2(Phase 12A): candidate_media에 canonical_url / instagram_media_id 추가,
@@ -15,7 +18,7 @@ import_events 테이블 추가. 기존 DB는 core/database.py의 마이그레이
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -133,6 +136,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         finished_at TEXT,
         result TEXT,
         error TEXT,
+        approved_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (media_pk, action_type)

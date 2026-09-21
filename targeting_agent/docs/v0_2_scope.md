@@ -169,7 +169,7 @@ ai:
 11A (Feasibility Spike)
   → 12A (Candidate Input Fallback 기본 확보)
   → 13  (Claude Code Runtime + Prompt Version + Cache + Heuristic fallback) ✔ 완료
-  → 14  (Dashboard Action UI)
+  → 14  (Dashboard Action UI) ✔ 완료
   → 11B (11A가 GO/LIMITED GO일 때만 Commenter Discovery 구현)
   → 16A (Response Tracking)
   → 16B (Follow-back: 공식 지원 여부에 따라 자동 또는 수동)
