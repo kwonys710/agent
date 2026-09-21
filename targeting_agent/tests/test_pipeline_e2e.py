@@ -72,22 +72,41 @@ def test_full_dry_run_pipeline(tmp_path) -> None:
         assert summary.comments.generated >= summary.comments.posts * (per_post - 1)
         assert summary.comments.none_generated == 0
 
-        # Action Queue & Dry Run 실행
+        # Action Queue는 만들어지되, 승인 전에는 실행되지 않는다(Phase 14.1 Approval Gate)
         assert summary.queue.likes >= 1 and summary.queue.comments >= 1
-        assert summary.execution.success >= 1
+        assert summary.execution.success == 0
         assert summary.execution.failed == 0
+        assert summary.execution.awaiting_approval == summary.queue.total
+        assert conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0] == 0
         assert summary.dry_run is True
 
-        # SQLite 기록 확인
-        assert conn.execute("SELECT COUNT(*) FROM interactions WHERE dry_run = 1").fetchone()[0] == summary.execution.success
+        # 운영자가 Dashboard에서 승인한 뒤에야 실행 대상이 된다
+        from targeting_agent.actions.controller import ActionController
+        from targeting_agent.actions.executors import create_executor
+        from targeting_agent.core.models import ActionType
+        from targeting_agent.dashboard.service import DashboardService
+
+        media_pk = int(
+            conn.execute(
+                "SELECT media_pk FROM action_queue WHERE action_type = 'LIKE' LIMIT 1"
+            ).fetchone()[0]
+        )
+        DashboardService(conn, config).approve(media_pk, [ActionType.LIKE])
+
+        executor = create_executor(
+            config.executor_mode, export_dir=config.export_dir, run_id="approved", dry_run=True
+        )
+        execution = ActionController(config, conn, executor).run()
+
+        assert execution.success == 1
+        assert conn.execute("SELECT COUNT(*) FROM interactions WHERE dry_run = 1").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM interactions WHERE dry_run = 0").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == summary.execution.success
+        assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 1
         assert conn.execute(
             "SELECT COUNT(*) FROM action_queue WHERE status = ?", (ActionStatus.SUCCESS.value,)
-        ).fetchone()[0] == summary.execution.success
+        ).fetchone()[0] == 1
 
-        # 수동 실행 목록 생성
-        export = Path(summary.export_path)
+        export = Path(str(executor.health_check()["export_path"]))
         assert export.exists() and export.stat().st_size > 0
 
         text = format_summary(summary, config)
@@ -114,9 +133,9 @@ def test_rerun_is_idempotent(tmp_path) -> None:
         # 필터를 통과해 DB에 저장됐던 건들이 이번엔 전부 중복으로 잡힌다
         assert second.discovery.duplicate == first.discovery.new
         assert counts_after["candidate_media"] == counts_before["candidate_media"]
-        # 첫 실행에서 한도로 남았던 Action은 이어서 처리될 수 있으나, 중복 생성은 없다
+        # 승인 전이므로 실행은 일어나지 않고, 중복 생성도 없다
         assert counts_after["action_queue"] == counts_before["action_queue"]
-        assert counts_after["interactions"] >= counts_before["interactions"]
+        assert counts_after["interactions"] == counts_before["interactions"] == 0
     finally:
         conn.close()
 

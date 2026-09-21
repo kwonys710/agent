@@ -16,7 +16,8 @@ from typing import Any, Mapping, Optional
 from ..core.config import Config
 from ..core.database import (
     bump_stat,
-    fetch_pending_actions,
+    count_unapproved_actions,
+    fetch_executable_actions,
     record_interaction,
     today_str,
     update_action_status,
@@ -38,6 +39,7 @@ class ExecutionSummary:
     skipped: int = 0
     failed: int = 0
     awaiting: int = 0  # 목록에 올렸고 운영자 확인을 기다리는 건수(실제 모드)
+    awaiting_approval: int = 0  # Dashboard 승인을 기다리는 건수(실행 대상 아님)
     halted: bool = False
     halt_reason: str = ""
     skip_reasons: dict[str, int] = field(default_factory=dict)
@@ -93,8 +95,14 @@ class ActionController:
             logger.error("Executor 세션이 유효하지 않아 실행을 중단합니다: %s", self.executor.name)
             return summary
 
-        actions = fetch_pending_actions(self.conn, limit=self.max_actions_per_run or None)
-        logger.info("실행 대상 Action %d건 (dry_run=%s)", len(actions), self.dry_run)
+        actions = fetch_executable_actions(self.conn, limit=self.max_actions_per_run or None)
+        summary.awaiting_approval = count_unapproved_actions(self.conn)
+        logger.info(
+            "실행 대상 Action %d건 (승인 대기 %d건, dry_run=%s)",
+            len(actions),
+            summary.awaiting_approval,
+            self.dry_run,
+        )
 
         errors = 0
         try:

@@ -19,7 +19,8 @@ from targeting_agent.actions.rate_limiter import RateLimiter
 from targeting_agent.core.config import Config
 from targeting_agent.core.database import (
     enqueue_action,
-    fetch_pending_actions,
+    utc_now,
+    fetch_executable_actions,
     insert_candidate,
     update_action_status,
 )
@@ -36,13 +37,21 @@ def _real_config(config: Config) -> Config:
     return Config(raw=raw, path=config.path, base_dir=config.base_dir)
 
 
-def _queue_one(conn, candidate, action_type=ActionType.LIKE, comment=None, run_id="r1") -> int:
+def _queue_one(
+    conn, candidate, action_type=ActionType.LIKE, comment=None, run_id="r1", approved=True
+) -> int:
+    """Action을 큐에 넣는다. approved=True면 운영자 승인까지 마친 상태로 만든다."""
     media_pk = insert_candidate(conn, candidate)
     action_id = enqueue_action(
         conn, run_id=run_id, media_pk=media_pk, creator_id=1, action_type=action_type,
         target_score=90.0, priority=90, executor="manual", dry_run=False,
         comment_text=comment,
     )
+    if approved:
+        conn.execute(
+            "UPDATE action_queue SET approved_at = ? WHERE action_id = ?",
+            (utc_now(), int(action_id)),
+        )
     conn.commit()
     return int(action_id)
 
@@ -102,7 +111,7 @@ def test_awaiting_actions_not_re_executed(config, conn, sample_candidate) -> Non
     action_id = _queue_one(conn, sample_candidate)
     update_action_status(conn, action_id, ActionStatus.APPROVED)
     conn.commit()
-    assert fetch_pending_actions(conn) == []
+    assert fetch_executable_actions(conn) == []
 
 
 def test_awaiting_counts_toward_daily_limit(config, conn, sample_candidate) -> None:

@@ -206,7 +206,8 @@ run_targeting_dashboard.bat
 - 캡션·해시태그·요약·주제·분위기·언어, **relevance_score와 저장된 짧은 사유**, 점수 구성요소(막대)
 - `Instagram에서 열기`(새 탭). Dashboard는 Instagram에 로그인하거나 스크래핑하지 않는다
 - 댓글 후보 중 하나 선택, 또는 **직접 수정**(원본 후보는 보존되고 수정본은 `generator=operator`로 따로 저장)
-- `LIKE` / `COMMENT` / 둘 다 선택 후 **Action 승인** → Action Queue에 적재(`approved_at` 기록)
+- `LIKE` / `COMMENT` / 둘 다 선택 후 **Action 승인** → Action Queue에 적재(`approved_at` 기록).
+  **승인하지 않은 Action은 실행되지 않는다**(아래 Approval Gate)
 - `Skip`, `검토 대기로 되돌리기`(이미 실행된 Interaction이 있으면 거부)
 - Feedback 6종: 좋은 Target / 관심 없음 / 좋은 댓글 / 나쁜 댓글 / 응답 있음 / 팔로우됨
 
@@ -218,6 +219,26 @@ run_targeting_dashboard.bat
 - 같은 승인을 여러 번 눌러도 Queue가 중복 생성되지 않는다(DB UNIQUE + 멱등 처리)
 - 같은 Feedback 반복 클릭은 중복 저장하지 않는다
 - 일일 한도를 넘은 승인은 경고를 표시하며, 실행 시점 정책은 기존 Rate Limiter가 그대로 적용한다
+
+### 8-1. Approval Gate (Phase 14.1)
+
+실제 실행 대상이 되는 조건:
+
+```
+status = 'PENDING'  AND  approved_at IS NOT NULL
+```
+
+- 파이프라인이 자동으로 만든 Action은 `approved_at`이 비어 있다 → **실행 대상 아님**
+- 운영자가 Dashboard에서 승인해야 실행 후보가 된다
+- 승인은 조건 하나일 뿐이다. 최종 실행 가능 여부는 다음을 모두 만족해야 한다:
+
+```
+승인됨 AND PENDING AND 일일 한도 OK AND Creator cooldown OK
+       AND 중복 Interaction 없음 AND Executor 사용 가능
+```
+
+`run_targeting.bat` 실행 결과에 `승인 대기 N건`으로 표시되며, Dashboard의 Action Queue
+탭에서는 `승인 대기` / `실행 대기(승인됨)`로 구분된다.
 
 ## 9. 실행 결과물
 

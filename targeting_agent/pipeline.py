@@ -450,6 +450,11 @@ def format_summary(summary: RunSummary, config: Config) -> str:
         f"   SKIPPED   : {summary.execution.skipped}",
         f"   ERROR     : {summary.execution.failed}",
     ]
+    if summary.execution.awaiting_approval:
+        lines.append(
+            f"   승인 대기 : {summary.execution.awaiting_approval} "
+            "(Dashboard에서 승인해야 실행 대상이 됩니다)"
+        )
     if summary.execution.awaiting:
         lines.append(f"   확인 대기 : {summary.execution.awaiting} (처리 후 --confirm)")
     usage = summary.ai_usage

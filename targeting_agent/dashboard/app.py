@@ -299,11 +299,16 @@ def _queue_tab(conn: sqlite3.Connection) -> str:
     rows = queries.list_actions(conn)
     if not rows:
         return '<p class="muted">Action이 없습니다.</p>'
+    def label(row: Any) -> str:
+        if row["status"] != "PENDING":
+            return str(row["status"])
+        return "실행 대기(승인됨)" if row["approved_at"] else "승인 대기"
+
     body = "".join(
         f"<tr><td>@{e(r['username'])}</td><td>{e(r['action_type'])}</td>"
         f"<td>{e(r['comment_text'] or '')}</td><td>{float(r['target_score'] or 0):.0f}</td>"
         f"<td>{e(r['created_at'])}</td><td>{e(r['approved_at'] or '-')}</td>"
-        f"<td>{e(r['status'])}</td></tr>"
+        f"<td>{e(label(r))}</td></tr>"
         for r in rows
     )
     return (

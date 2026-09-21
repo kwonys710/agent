@@ -344,7 +344,7 @@ def test_queue_and_stats_tabs_render(conn, config) -> None:
     _service(conn, config).add_feedback(media_pk, FeedbackType.GOOD_TARGET)
 
     queue_html = render(conn, config, Page(tab="queue"), token="t")
-    assert "Action Queue" in queue_html and "PENDING" in queue_html
+    assert "Action Queue" in queue_html and "실행 대기(승인됨)" in queue_html
     assert "<form" not in queue_html          # 실행을 트리거하는 폼이 없다
 
     stats_html = render(conn, config, Page(tab="stats"), token="t")

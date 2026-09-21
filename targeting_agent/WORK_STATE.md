@@ -73,6 +73,15 @@ Phase 14 완료: Dashboard Action UI (stdlib http.server 유지, 신규 의존�
 - 127.0.0.1 전용(외부 바인딩 시 실행 거부), POST 토큰 확인
 - Dashboard는 Claude를 호출하지 않고 저장된 분석 결과만 표시한다
 
+Phase 14.1 완료: Approval Gate Hardening
+- 발견: 실행 대상 조회가 status='PENDING'만 보고 있어 승인하지 않은 자동 생성 Action도
+  실행될 수 있었다.
+- fetch_pending_actions → fetch_executable_actions 로 바꾸고
+  조건을 status='PENDING' AND approved_at IS NOT NULL 로 강화
+- count_unapproved_actions 추가 → Run Summary에 '승인 대기 N건' 표시
+- Dashboard Action Queue 탭: 승인 대기 / 실행 대기(승인됨) 구분
+- 기존 Safety(일일 한도/Creator cooldown/중복 Interaction)는 그대로 적용됨을 테스트로 고정
+
 차단: 실계정 Probe 결과 확정 전까지 Phase 11B 본 구현 시작 금지
 
 Pending:

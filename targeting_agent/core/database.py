@@ -429,14 +429,26 @@ def enqueue_action(
     return int(cursor.lastrowid) if cursor.rowcount else None
 
 
-def fetch_pending_actions(conn: sqlite3.Connection, limit: Optional[int] = None) -> list[sqlite3.Row]:
+def fetch_executable_actions(
+    conn: sqlite3.Connection, limit: Optional[int] = None
+) -> list[sqlite3.Row]:
+    """실제로 실행할 수 있는 Action만 돌려준다(Approval Gate).
+
+    조건: status = 'PENDING' AND approved_at IS NOT NULL
+
+    - 파이프라인이 자동 생성한 Action은 approved_at이 비어 있다 → 실행 대상 아님.
+      운영자가 Dashboard에서 승인해야 approved_at이 채워진다.
+    - APPROVED는 Phase 9의 '수동 처리 후 확인 대기' 상태이므로 재실행 대상이 아니다.
+
+    승인은 실행 조건 중 하나일 뿐이다. 일일 한도/Creator cooldown/중복 Interaction 등
+    기존 안전 조건은 Rate Limiter에서 그대로 적용된다.
+    """
     sql = (
         "SELECT a.*, m.media_id, m.permalink, c.username "
         "FROM action_queue a "
         "JOIN candidate_media m ON m.media_pk = a.media_pk "
         "JOIN creators c ON c.creator_id = a.creator_id "
-        # APPROVED는 '운영자 확인 대기' 상태이므로 재실행 대상이 아니다.
-        "WHERE a.status = 'PENDING' "
+        "WHERE a.status = 'PENDING' AND a.approved_at IS NOT NULL "
         "ORDER BY a.priority DESC, a.target_score DESC, a.action_id ASC"
     )
     params: list[Any] = []
@@ -444,6 +456,14 @@ def fetch_pending_actions(conn: sqlite3.Connection, limit: Optional[int] = None)
         sql += " LIMIT ?"
         params.append(int(limit))
     return list(conn.execute(sql, params).fetchall())
+
+
+def count_unapproved_actions(conn: sqlite3.Connection) -> int:
+    """승인을 기다리는 Action 수(Run Summary 안내용)."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM action_queue WHERE status = 'PENDING' AND approved_at IS NULL"
+    ).fetchone()
+    return int(row["n"])
 
 
 def update_action_status(
