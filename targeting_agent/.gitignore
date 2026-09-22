@@ -14,3 +14,8 @@ data/inbox/*.csv
 data/inbox/*_report.md
 data/inbox/processed/
 data/inbox/failed/
+
+# Phase 18A: 브라우저 로그인 세션 / 디버그 스크린샷 (절대 커밋하지 않는다)
+data/browser_profile/
+data/browser_debug/
+data/.browser_discovery.lock

@@ -96,6 +96,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Scheduled Run(배치): inbox 처리 → 신규 후보 분석 → Daily Summary 생성",
     )
+    parser.add_argument(
+        "--discover",
+        action="store_true",
+        help="Browser Discovery: Instagram 검색으로 Reel 후보 수집 → 저장 → 분석(읽기 전용)",
+    )
+    parser.add_argument(
+        "--discover-only",
+        action="store_true",
+        help="Browser Discovery를 수집·저장까지만 수행(분석/Claude 호출 없음)",
+    )
+    parser.add_argument(
+        "--query",
+        action="append",
+        default=None,
+        metavar="검색어",
+        help="Browser Discovery 검색어 override(여러 번 지정 가능)",
+    )
     parser.add_argument("--stats", action="store_true", help="DB 현황만 출력하고 종료")
     parser.add_argument(
         "--list-pending", action="store_true", help="운영자 확인 대기 Action 목록 출력"
@@ -147,6 +164,9 @@ def apply_overrides(config: Config, args: argparse.Namespace) -> Config:
     if args.limit is not None:
         execution = {**raw.get("actions", {}).get("execution", {}), "max_actions_per_run": int(args.limit)}
         raw["actions"] = {**raw.get("actions", {}), "execution": execution}
+    if getattr(args, "discover", False) or getattr(args, "discover_only", False):
+        # 운영자가 --discover 로 명시적으로 실행할 때만 켠다(Scheduler 자동 연결 없음).
+        raw["browser_discovery"] = {**raw.get("browser_discovery", {}), "enabled": True}
     return Config(raw=raw, path=config.path, base_dir=config.base_dir)
 
 
@@ -432,6 +452,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.import_only:
         return run_import_only(config, args)
+
+    if args.discover or args.discover_only:
+        from .discovery.browser_runner import format_result, run_browser_discovery
+
+        result = run_browser_discovery(
+            config, queries=args.query, process=not args.discover_only
+        )
+        print(format_result(result))
+        return result.exit_code
 
     if args.scheduled:
         from .scheduler.runner import format_result, run_scheduled

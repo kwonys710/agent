@@ -188,6 +188,40 @@ learning:
     minimum_band_samples: 5     # Score 구간 추천에 필요한 최소 표본
   min_keyword_score: 2.0        # 키워드 신호 강도 임계값
 
+browser_discovery:
+  # Phase 18A — Instagram 웹 화면에서 Reel 후보를 찾는다(읽기 전용).
+  # 브라우저는 페이지 열기 / 검색 / 스크롤 / 게시물 열기 / 공개 텍스트 읽기만 한다.
+  # 좋아요·댓글·팔로우·DM·저장·공유 등 쓰기 동작은 구현하지 않는다.
+  # 로그인은 운영자가 run_instagram_session.bat 에서 **직접** 한다(ID/PW를 저장하지 않는다).
+  # Scheduler와 자동 연결하지 않는다 — 운영자가 --discover 로 실행할 때만 동작한다.
+  enabled: false
+  headless: false          # 로그인/Challenge를 사람이 볼 수 있어야 하므로 기본 false
+  profile_dir: "data/browser_profile"   # 운영자 로그인 세션(git에 올리지 않는다)
+  timeout_ms: 20000
+  scroll_rounds: 3
+  media_types: ["REEL"]
+  queries: []              # 비우면 discovery.hashtags 를 검색어로 재사용한다
+  limits:
+    # 플랫폼 제한 우회가 아니라, 운영자가 스스로 거는 보수적 내부 상한이다.
+    max_queries_per_run: 5
+    max_candidates_per_query: 10
+    max_candidates_per_run: 40
+    max_analyze_per_run: 20
+  stop_on:
+    # 아래 상태가 감지되면 즉시 중단한다. 자동으로 풀지 않는다.
+    login_required: true
+    challenge: true
+    platform_warning: true
+  lock:
+    enabled: true
+    path: "data/.browser_discovery.lock"
+    stale_minutes: 30
+  debug:
+    # selector 실패 등 예외 상황에서만 스크린샷을 남긴다(전체 HTML dump 금지).
+    enabled: true
+    dir: "data/browser_debug"
+    max_screenshots: 10
+
 scheduler:
   # Windows Task Scheduler가 하루 1회 실행하는 배치 모드(python -m targeting_agent.main --scheduled).
   # Scheduled Run은 후보 수집·분석과 요약까지만 하고, Instagram Action은 실행하지 않는다.

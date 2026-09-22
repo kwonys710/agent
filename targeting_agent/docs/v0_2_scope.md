@@ -145,6 +145,8 @@ ai:
 ## 4. v0.2에서 하지 않는 것 (Non-goals)
 
 - **BrowserExecutor** — Phase 9 결정 유지(`docs/phase9_browser_executor.md`)
+  (Phase 18A의 브라우저는 **Discovery 전용 읽기**이며 Action 실행에 쓰지 않는다 —
+  `docs/phase18a_browser_discovery.md`)
 - 팔로우/언팔로우 자동화, DM 자동 발송
 - 다계정 운영, 클라우드 배포, 팀 기능
 - 영상 다운로드 기반 시각 분석(비용·저작권·정책 리스크 대비 이득이 불명확)

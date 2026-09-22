@@ -8,6 +8,8 @@
 - comment_drafts(media_pk, normalized_text) UNIQUE (동일 댓글 중복 저장 차단)
 - candidate_media.canonical_url UNIQUE (URL 입력 시 동일 게시물 중복 차단)
 
+v8(Phase 18A): browser_discovery_runs — Browser Discovery 실행 이력(세션 상태/중단 사유 포함).
+
 v7(Phase 17): target_profiles(버전별 topic weight, rollback 가능) / learning_runs(학습 이력).
 
 v6(Phase 15): scheduled_runs — Scheduled Run 이력.
@@ -24,7 +26,7 @@ import_events 테이블 추가. 기존 DB는 core/database.py의 마이그레이
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -210,6 +212,27 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         fallbacks INTEGER NOT NULL DEFAULT 0,
         errors INTEGER NOT NULL DEFAULT 0,
         summary_file TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS browser_discovery_runs (
+        run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        status TEXT NOT NULL,
+        session_state TEXT,
+        queries INTEGER NOT NULL DEFAULT 0,
+        found INTEGER NOT NULL DEFAULT 0,
+        collected INTEGER NOT NULL DEFAULT 0,
+        added INTEGER NOT NULL DEFAULT 0,
+        duplicate INTEGER NOT NULL DEFAULT 0,
+        invalid INTEGER NOT NULL DEFAULT 0,
+        analyzed INTEGER NOT NULL DEFAULT 0,
+        needs_enrichment INTEGER NOT NULL DEFAULT 0,
+        claude_calls INTEGER NOT NULL DEFAULT 0,
+        cache_hits INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        stop_reason TEXT
     )
     """,
     """

@@ -34,5 +34,13 @@ class RateLimitExceeded(TargetingError):
     """내부 Daily Limit / Creator Cooldown 초과. 플랫폼 제한 우회 목적이 아니다."""
 
 
+class BrowserSessionError(TargetingError):
+    """브라우저 세션 문제(로그인 필요/Challenge/경고). Run을 즉시 중단한다."""
+
+    def __init__(self, state: str, message: str) -> None:
+        super().__init__(message)
+        self.state = state
+
+
 class PlatformWarningError(TargetingError):
     """플랫폼 Warning / Challenge / 로그인 요구 감지. 즉시 자동 실행을 중단한다."""

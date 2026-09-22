@@ -1,6 +1,6 @@
 # Targeting Agent 작업 상태
 
-Current Phase: 10 완료 (v0.1 계획 범위 전체 완료)
+Current Phase: 18A 완료 (Instagram Browser Discovery — 읽기 전용, 기본 OFF)
 
 Completed:
 - Phase 1: 구조 / config.yaml / .env.example / SQLite / Logging
@@ -126,10 +126,35 @@ Phase 17.1 완료: 운영 UX / 통계 Hotfix
 - 같은 수정을 Daily Summary와 Claude vs Heuristic 승인율에도 적용.
 - Approval Gate / Learning / Executor / schema 변경 없음.
 
+Phase 18A 완료: Instagram Browser Discovery (읽기 전용, 기본 OFF)
+- discovery/browser_models.py: SessionState / PostDetail / QueryResult / DiscoveryStats
+- discovery/browser_selectors.py: selector·세션 판정 문자열을 한 파일에 모음(화면 변경 대응 지점)
+- discovery/browser_instagram.py: BrowserPage Protocol + PlaywrightBrowser(persistent profile)
+  + InstagramBrowserDiscovery(검색→후보 수집, 검색어 단위 실패 격리)
+- discovery/browser_runner.py: lock → 세션 확인 → Discovery → CandidateIngestor
+  → CandidateProcessor → browser_discovery_runs 이력
+- scripts/init_instagram_session.py + run_instagram_session.bat: 운영자가 직접 로그인
+  (--check 상태 확인 / --reset 은 'DELETE' 입력 확인 필요)
+- run_targeting_discovery.bat, CLI --discover / --discover-only / --query
+- schema v8: browser_discovery_runs (추가 전용, 기존 테이블 변경 없음)
+- 브라우저 동작은 열기/검색/스크롤/게시물 열기/공개 텍스트 읽기까지.
+  좋아요·댓글·팔로우·DM·저장·공유, 탐지/CAPTCHA/Challenge/Rate Limit 우회,
+  stealth·fingerprint·proxy·계정 rotation, 비공식 API·GraphQL, 응답 가로채기,
+  ID/PW 자동입력, 쿠키·세션 토큰 추출 — 모두 코드 자체를 두지 않음(테스트로 검사)
+- LOGIN_REQUIRED / CHALLENGE / PLATFORM_WARNING / UNKNOWN → 즉시 중단(SESSION_STOPPED)
+- 내부 상한(운영자 한도, 우회 아님): 검색어 5 / 검색어당 10 / 실행당 40 / 분석 20
+- Token Guard: 신규(ADDED) 후보만 분석, 중복 재분석 없음, 캡션 없으면 NEEDS_ENRICHMENT,
+  Claude 호출은 CandidateProcessor의 캐시·한도 가드를 그대로 통과할 때만
+- 수동 입력 경로(Dashboard URL / --add / inbox CSV)는 그대로 유지(기본 경로)
+- Scheduler 자동 연결 없음(테스트로 검사), 기본값 browser_discovery.enabled=false
+- 테스트 34개 전부 FakeBrowser 기반 — 실제 Instagram/Claude CLI 호출 없음
+- 미수행: 실 Instagram 스모크(로그인 세션이 있는 운영자 PC에서만 가능)
+
 Next: 운영 관찰 / v0.3 검토
 Meta API: Optional (진행을 막지 않음)
 
 Pending:
+- Phase 18A 실 Instagram 스모크 테스트(운영자 PC: 로그인 → --discover-only → selector 확인)
 - 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)
 - Gemini 분석/댓글 생성 실사용 검증(API Key 필요)
 - 운영 데이터 축적 후 학습 임계값(min_keyword_media 등) 재조정

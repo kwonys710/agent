@@ -10,5 +10,10 @@ python-dotenv>=1.0.0
 # 테스트
 pytest>=7.4.0
 
+# Phase 18A: Instagram Browser Discovery(읽기 전용).
+# 설치 후 `python -m playwright install chromium` 이 필요하다.
+# 미설치 환경에서도 나머지 기능은 그대로 동작한다(지연 import).
+playwright>=1.44.0
+
 # AI Intelligence Engine은 로컬에 설치·로그인된 Claude Code CLI를 사용한다.
 # 별도의 LLM API SDK(openai / google-genai / anthropic)를 설치하지 않는다.

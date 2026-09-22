@@ -107,6 +107,33 @@ https://www.instagram.com/reel/BBB/,creator_a,퇴근 브이로그
 
 > Phase 12A는 **후보 입력만** 담당한다. Instagram 페이지 접근·로그인·스크래핑은 하지 않는다.
 
+### 3-3. Instagram 브라우저 검색으로 수집 (Phase 18A)
+
+수동 입력(3-1 / 3-2 / Dashboard URL 입력)은 그대로 유지되는 기본 경로다.
+브라우저 수집은 **선택 기능**이며 기본값은 꺼져 있다.
+
+```bat
+run_instagram_session.bat                    REM 운영자가 직접 로그인(최초 1회)
+run_targeting_discovery.bat                  REM 검색 → 후보 수집 → 저장 → 분석
+run_targeting_discovery.bat --discover-only  REM 수집·저장까지만(Claude 호출 0)
+```
+
+- 로그인은 **운영자가 브라우저에서 직접** 한다. ID/PW를 묻거나 저장하지 않는다.
+  세션은 `data/browser_profile/`에만 남고 git에 올라가지 않는다.
+- 브라우저가 하는 일은 **페이지 열기 / 검색 / 스크롤 / 게시물 열기 / 공개 텍스트 읽기**뿐이다.
+  좋아요·댓글·팔로우·DM·저장·공유는 **코드 자체가 없다.**
+- 로그인 필요 / 본인 확인(Challenge) / 이용 제한 경고가 감지되면 **즉시 중단**한다.
+  자동으로 풀지 않는다.
+- 실행당 상한: 검색어 5개 / 검색어당 후보 10개 / 총 40개 / 분석 20건
+  (플랫폼 제한 우회가 아니라 운영자 내부 한도).
+- 수집된 후보는 `source='instagram_browser_search'`로 저장되어 기존 분석·Dashboard 승인
+  흐름을 그대로 탄다. 중복 후보는 다시 분석하지 않는다.
+- **Scheduler와 자동 연결하지 않는다.** Scheduled Run은 브라우저를 열지 않는다.
+- 자세한 내용은 `docs/phase18a_browser_discovery.md` 참고.
+
+> 로그인 상태의 자동 수집은 Instagram 이용약관의 자동화 수집 조항에 저촉될 수 있고,
+> 계정 제재 위험은 운영자 계정이 진다. 사용 여부는 운영자가 판단한다.
+
 ## 4. 파이프라인
 
 ```
@@ -440,6 +467,9 @@ Feedback / 승인 / Skip → topic별 신호 → 변화량 제한 → 새 Profil
 - **BrowserExecutor는 구현하지 않는다**(Phase 9 검토 결과, `docs/phase9_browser_executor.md`).
   금지선을 지키면서 만들 수 있는 것이 사실상 없고, 제재 위험은 운영자 계정이 진다.
 - 플랫폼 경고/인증 요구가 감지되면 자동 실행을 즉시 중단한다.
+- Phase 18A의 브라우저는 **읽기 전용 Discovery 전용**이다. Action 실행에는 쓰지 않는다
+  (BrowserExecutor 미구현 결정은 그대로 유효하다).
+- Instagram 자격증명은 소스/설정/DB/로그 어디에도 저장하지 않는다. 로그인은 사람이 직접 한다.
 
 ## 15. 테스트
 
@@ -454,6 +484,7 @@ python -m pytest targeting_agent/tests -q
 | 구현 완료 | Config, SQLite, Logging, CSV/JSON/URL Import Discovery, 규칙 기반 분석, 유사도, Target Score, 댓글 생성/품질/중복 필터, Action Queue, Rate Limiter, ManualExecutor, Dry Run + 수동 확인 흐름, Dashboard, Feedback 기록/학습 반영 |
 | 구현 완료 | AI Intelligence = Claude Code CLI(캐시·한도·fallback 포함) |
 | 구현 완료(조건부) | HashtagDiscovery — 공식 API 토큰/권한 필요, Creator 미확인 제약 있음 |
+| 구현 완료(기본 OFF) | Instagram Browser Discovery(Phase 18A) — 읽기 전용 검색 수집, `--discover` |
 | 미지원 확인 | OfficialAPIExecutor 쓰기(공식 API에 해당 기능 없음) |
 | 구현 안 함(결정) | BrowserExecutor — Phase 9 검토 결과 미구현, `docs/phase9_browser_executor.md` 참고 |
 
