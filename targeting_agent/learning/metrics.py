@@ -102,13 +102,20 @@ def collect_quality_metrics(conn: sqlite3.Connection) -> QualityMetrics:
         scalar("SELECT COUNT(*) FROM feedback WHERE feedback_type = 'NOT_MY_STYLE'"), feedback_total
     )
 
-    for analyzer, attribute in (("claude_code", "claude_approval_rate"), ("heuristic", "heuristic_approval_rate")):
-        total = scalar(
-            "SELECT COUNT(DISTINCT media_pk) FROM media_analysis WHERE analyzer = ?", analyzer
-        )
+    # 후보별 최종 분석 방식으로 나눈다(한 후보가 양쪽 분모에 들어가지 않게).
+    final_method = (
+        "SELECT media_pk, CASE WHEN SUM(analyzer = 'claude_code') > 0 "
+        "THEN 'claude_code' ELSE 'heuristic' END AS final_analyzer "
+        "FROM media_analysis GROUP BY media_pk"
+    )
+    for analyzer, attribute in (
+        ("claude_code", "claude_approval_rate"),
+        ("heuristic", "heuristic_approval_rate"),
+    ):
+        total = scalar(f"SELECT COUNT(*) FROM ({final_method}) WHERE final_analyzer = ?", analyzer)
         approved_count = scalar(
-            "SELECT COUNT(DISTINCT a.media_pk) FROM media_analysis a "
-            f"WHERE a.analyzer = ? AND a.media_pk IN ({approved_media})",
+            f"SELECT COUNT(*) FROM ({final_method}) WHERE final_analyzer = ? "
+            f"AND media_pk IN ({approved_media})",
             analyzer,
         )
         setattr(metrics, attribute, _ratio(approved_count, total))

@@ -203,6 +203,50 @@ def insert_candidate(
     return int(cursor.lastrowid)
 
 
+def count_by_final_analyzer(
+    conn: sqlite3.Connection,
+    date_str: Optional[str] = None,
+    tz_offset_hours: int = DEFAULT_TZ_OFFSET_HOURS,
+) -> dict[str, int]:
+    """후보별 **최종 분석 방식** 기준 건수.
+
+    한 후보는 heuristic 행과 claude_code 행을 함께 가질 수 있다
+    (heuristic으로 먼저 분석한 뒤 Claude 결과를 덧입혀 저장하기 때문).
+    따라서 행 수를 세면 같은 후보가 양쪽에 모두 잡힌다.
+    claude_code 행이 하나라도 있으면 그 후보의 최종 방식은 claude_code다.
+
+    date_str을 주면 그 날짜에 분석된 후보만 센다(누적은 None).
+    """
+    where = ""
+    params: list[Any] = []
+    if date_str:
+        where = f"WHERE {_local_date_expr(tz_offset_hours, 'analyzed_at')} = ?"
+        params.append(date_str)
+
+    rows = conn.execute(
+        "SELECT final_analyzer, COUNT(*) AS n FROM ("
+        "  SELECT media_pk, CASE WHEN SUM(analyzer = 'claude_code') > 0 "
+        "    THEN 'claude_code' ELSE 'heuristic' END AS final_analyzer "
+        f"  FROM media_analysis {where} GROUP BY media_pk"
+        ") GROUP BY final_analyzer",
+        params,
+    ).fetchall()
+    counts = {"claude_code": 0, "heuristic": 0}
+    for row in rows:
+        counts[str(row["final_analyzer"])] = int(row["n"])
+    return counts
+
+
+def final_analyzer_of(conn: sqlite3.Connection, media_pk: int) -> Optional[str]:
+    """후보 1건의 최종 분석 방식(분석 기록이 없으면 None)."""
+    row = conn.execute(
+        "SELECT CASE WHEN SUM(analyzer = 'claude_code') > 0 THEN 'claude_code' ELSE 'heuristic' END "
+        "AS final_analyzer, COUNT(*) AS n FROM media_analysis WHERE media_pk = ?",
+        (media_pk,),
+    ).fetchone()
+    return str(row["final_analyzer"]) if row and int(row["n"]) else None
+
+
 def record_import_event(
     conn: sqlite3.Connection,
     *,

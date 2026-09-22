@@ -197,7 +197,7 @@ run_targeting_dashboard.bat
 
 | Tab | 내용 |
 | --- | --- |
-| Review | **새 Candidate 추가**(URL 붙여넣기 → `추가 후 분석`) + 상단 요약(오늘 발견/분석/검토 대기/승인/Skip, LIKE·COMMENT 한도, Claude 호출) + 후보 목록(점수 내림차순, 상태·소스·분석방식·점수 필터) + 상세 |
+| Review | 상단 카드(오늘 발견·분석 완료·Claude/Heuristic은 같은 기준일, 후보별 최종 분석 방식 기준) · **새 Candidate 추가**(URL 붙여넣기 → `추가 후 분석`) + 상단 요약(오늘 발견/분석/검토 대기/승인/Skip, LIKE·COMMENT 한도, Claude 호출) + 후보 목록(점수 내림차순, 상태·소스·분석방식·점수 필터) + 상세 |
 | Action Queue | Creator / Action / Comment / Score / Created / Approved / Status |
 | Feedback / Stats | Feedback 누적과 최근 입력 내역 |
 
@@ -224,6 +224,9 @@ Instagram URL  [ https://www.instagram.com/reel/ABC123/ ]
 - 캡션·해시태그·요약·주제·분위기·언어, **relevance_score와 저장된 짧은 사유**, 점수 구성요소(막대)
 - `Instagram에서 열기`(새 탭). Dashboard는 Instagram에 로그인하거나 스크래핑하지 않는다
 - 댓글 후보 중 하나 선택, 또는 **직접 수정**(원본 후보는 보존되고 수정본은 `generator=operator`로 따로 저장)
+- `LIKE` / `COMMENT` 체크박스는 **현재 Target Score와 config 기준(`require_score_for_like` /
+  `require_score_for_comment`)에 따라 기본 추천**되며, 기준 미달이어도 직접 선택할 수 있다.
+  이미 Action이 만들어진 후보는 기존 선택이 유지된다.
 - `LIKE` / `COMMENT` / 둘 다 선택 후 **Action 승인** → Action Queue에 적재(`approved_at` 기록).
   **승인하지 않은 Action은 실행되지 않는다**(아래 Approval Gate)
 - `Skip`, `검토 대기로 되돌리기`(이미 실행된 Interaction이 있으면 거부)

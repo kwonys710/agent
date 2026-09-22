@@ -266,6 +266,11 @@ def _detail(conn: sqlite3.Connection, config: Config, media_pk: int, token: str)
         for f, text in FEEDBACK_BUTTONS
     )
 
+    defaults = queries.default_action_selection(detail, config)
+    like_checked = " checked" if defaults.like else ""
+    comment_checked = " checked" if defaults.comment else ""
+    action_notice = e(defaults.notice)
+
     relevance = analysis.get("relevance_score")
     meta = (
         f'분석 {e(label)} · model {e(config.get("ai.model", "-"))} · '
@@ -308,8 +313,9 @@ def _detail(conn: sqlite3.Connection, config: Config, media_pk: int, token: str)
 
 <div class="card"><h2>Action</h2>
   <form method="post" action="/approve">{hidden}
-    <label><input type="checkbox" name="like" checked> LIKE</label>
-    <label style="margin-left:12px"><input type="checkbox" name="comment"> COMMENT</label>
+    <label><input type="checkbox" name="like"{like_checked}> LIKE</label>
+    <label style="margin-left:12px"><input type="checkbox" name="comment"{comment_checked}> COMMENT</label>
+    <p class="muted">{action_notice}</p>
     <p class="muted">선택한 Action을 Queue에 올립니다. 이 화면에서 Instagram 동작을 실행하지 않습니다.</p>
     <button class="p" type="submit">Action 승인</button>
   </form>

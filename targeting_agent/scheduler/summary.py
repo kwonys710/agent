@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from ..core.config import Config
+from ..core.database import count_by_final_analyzer
 from ..core.logger import get_logger
 
 logger = get_logger("scheduler.summary")
@@ -88,6 +89,8 @@ def build_summary_data(
         )
     }
 
+    analyzers = count_by_final_analyzer(conn, date, tz)
+
     candidate = {
         "registered_today": scalar(
             f"SELECT COUNT(*) FROM candidate_media WHERE {_local_date('discovered_at', tz)} = ?", date
@@ -106,12 +109,9 @@ def build_summary_data(
         "claude_limit": int(config.get("ai.daily_request_limit", 0)),
         "cache_hits": stats.get("claude_cache_hits", 0),
         "fallbacks": stats.get("claude_fallbacks", 0),
-        "claude_analyzed": scalar(
-            "SELECT COUNT(*) FROM media_analysis WHERE analyzer = 'claude_code'"
-        ),
-        "heuristic_analyzed": scalar(
-            "SELECT COUNT(*) FROM media_analysis WHERE analyzer = 'heuristic'"
-        ),
+        # 후보별 최종 분석 방식 기준(오늘 분석된 후보). 행 수가 아니라 후보 수를 센다.
+        "claude_analyzed": analyzers.get("claude_code", 0),
+        "heuristic_analyzed": analyzers.get("heuristic", 0),
     }
     minimum = int(float(config.get("scoring.minimum_target_score", 70)))
     auto = int(float(config.get("scoring.auto_action_score", 82)))

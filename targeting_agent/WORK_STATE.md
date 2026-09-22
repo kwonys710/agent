@@ -114,6 +114,18 @@ Phase 17 완료: Learning & Operational Stabilization
 - Dashboard Feedback/Stats 탭 + Daily Summary에 Learning 섹션
 - 학습 경로 Claude 호출 0, 과거 후보 점수 자동 재계산 없음
 
+Phase 17.1 완료: 운영 UX / 통계 Hotfix
+- Action 체크박스 기본값을 Target Score와 config threshold로 결정
+  (Score 66 → 둘 다 해제 + 기준 안내). 기존 Queue 선택과 SKIPPED 상태는 덮어쓰지 않는다.
+  임계값은 추천이지 차단이 아니다(수동 override 가능).
+- 통계 버그 수정: Claude 분석 후보는 heuristic 행과 claude_code 행을 함께 갖는데
+  집계가 '행 수'를 세어 같은 후보가 양쪽에 중복 집계됐다(화면상 Claude 7 / Heuristic 7).
+  후보별 최종 분석 방식 기준 distinct 집계로 교체.
+- '분석 완료' 카드도 같은 기준(오늘 분석된 후보 수)으로 통일 — daily_stats 카운터는
+  파이프라인 실행분만 세어 Dashboard 분석분이 빠져 있었다.
+- 같은 수정을 Daily Summary와 Claude vs Heuristic 승인율에도 적용.
+- Approval Gate / Learning / Executor / schema 변경 없음.
+
 Next: 운영 관찰 / v0.3 검토
 Meta API: Optional (진행을 막지 않음)
 

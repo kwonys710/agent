@@ -9,7 +9,9 @@ import json
 import sqlite3
 from typing import Any, Mapping, Optional, Sequence
 
-from ..core.database import today_str
+from dataclasses import dataclass
+
+from ..core.database import count_by_final_analyzer, today_str
 from ..core.models import ActionType, MediaStatus
 
 # 검토 화면에 올릴 후보 상태(처리 완료/차단은 기본 제외)
@@ -32,7 +34,7 @@ def _analysis_join() -> str:
 
 
 def daily_summary(conn: sqlite3.Connection, tz_offset: int = 9) -> dict[str, Any]:
-    """상단 요약. 저장된 통계와 상태 집계만 사용한다."""
+    """상단 요약. 저장된 통계와 상태 집계만 사용한다(모두 같은 기준일)."""
     date = today_str(tz_offset)
     statuses = {
         row["status"]: int(row["n"])
@@ -52,16 +54,15 @@ def daily_summary(conn: sqlite3.Connection, tz_offset: int = 9) -> dict[str, Any
             "SELECT action_type, status, COUNT(*) AS n FROM action_queue GROUP BY 1, 2"
         )
     }
-    analyzers = {
-        row["analyzer"]: int(row["n"])
-        for row in conn.execute(
-            "SELECT analyzer, COUNT(*) AS n FROM media_analysis GROUP BY analyzer"
-        )
-    }
+    # 후보별 최종 분석 방식 기준(같은 후보가 Claude/Heuristic 양쪽에 잡히지 않는다).
+    # 기준일은 상단 카드의 다른 값과 동일하게 '오늘 분석된 후보'로 맞춘다.
+    analyzers = count_by_final_analyzer(conn, date, tz_offset)
     return {
         "date": date,
         "discovered": stats.get("discovered", 0),
-        "analyzed": stats.get("analyzed", 0),
+        # '분석 완료'도 Claude/Heuristic 카드와 같은 기준(오늘 분석된 후보 수)으로 센다.
+        # daily_stats 카운터는 파이프라인 실행에서만 증가해 Dashboard 분석분이 빠졌었다.
+        "analyzed": analyzers.get("claude_code", 0) + analyzers.get("heuristic", 0),
         "pending_review": sum(statuses.get(s, 0) for s in REVIEW_STATUSES),
         "approved": statuses.get(MediaStatus.QUEUED.value, 0),
         "skipped": statuses.get(MediaStatus.SKIPPED.value, 0),
@@ -237,6 +238,65 @@ def learning_overview(conn: sqlite3.Connection) -> dict[str, Any]:
         "last_applied": bool(last and not last["dry_run"]),
         "changes": changes,
     }
+
+
+@dataclass(frozen=True)
+class ActionDefaults:
+    """Candidate Detail의 LIKE/COMMENT 기본 체크 상태와 안내 문구."""
+
+    like: bool
+    comment: bool
+    notice: str
+    source: str  # threshold | queue | skipped
+
+
+def default_action_selection(detail: Mapping[str, Any], config: Any) -> ActionDefaults:
+    """현재 Target Score와 config 기준으로 기본 체크 상태를 정한다.
+
+    우선순위:
+      1. 이미 만들어진 Action Queue(운영자의 이전 선택) — 새 기본값이 덮어쓰지 않는다
+      2. SKIPPED 후보 — 기본은 모두 해제
+      3. Target Score와 임계값 비교
+
+    임계값은 **추천 기준**이다. 미달이어도 사용자가 직접 체크할 수 있다(차단하지 않는다).
+    """
+    like_threshold = float(config.get("actions.require_score_for_like", 75))
+    comment_threshold = float(config.get("actions.require_score_for_comment", 82))
+    score = detail.get("target_score")
+    score_value = float(score) if score is not None else 0.0
+    score_text = "-" if score is None else f"{score_value:.0f}"
+
+    live = {
+        str(row["action_type"])
+        for row in (detail.get("actions") or [])
+        if str(row["status"]) in ("PENDING", "APPROVED", "RUNNING", "SUCCESS")
+    }
+    if live:
+        return ActionDefaults(
+            like="LIKE" in live,
+            comment="COMMENT" in live,
+            notice="이미 만들어진 Action 선택을 유지합니다.",
+            source="queue",
+        )
+
+    if str(detail.get("status") or "") == MediaStatus.SKIPPED.value:
+        return ActionDefaults(
+            like=False,
+            comment=False,
+            notice=f"보류(Skip)한 후보입니다. 현재 Score {score_text}",
+            source="skipped",
+        )
+
+    like_ok = score is not None and score_value >= like_threshold
+    comment_ok = score is not None and score_value >= comment_threshold
+    parts = [
+        f"현재 Score {score_text}",
+        f"LIKE 추천 기준 {like_threshold:.0f} {'충족' if like_ok else '미달'}",
+        f"COMMENT 추천 기준 {comment_threshold:.0f} {'충족' if comment_ok else '미달'}",
+    ]
+    if not like_ok and not comment_ok:
+        parts.append("자동 추천 기준 미달 — 필요하면 직접 선택할 수 있습니다")
+    return ActionDefaults(like=like_ok, comment=comment_ok, notice=" · ".join(parts), source="threshold")
 
 
 def analyzer_label(analyzer: Optional[str]) -> str:
