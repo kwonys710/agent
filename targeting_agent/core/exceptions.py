@@ -42,5 +42,24 @@ class BrowserSessionError(TargetingError):
         self.state = state
 
 
+class SelectorMismatch(DiscoveryError):
+    """화면 구조가 바뀌어 필요한 요소를 찾지 못했다(Phase 18A.1).
+
+    어느 단계(stage)에서, 어떤 selector 키를 시도하다 실패했는지를 함께 남긴다 —
+    "SELECTOR_MISMATCH"만으로는 어디를 고쳐야 할지 알 수 없기 때문이다.
+    """
+
+    def __init__(self, stage: str, tried: "tuple[str, ...]" = (), reason: str = "") -> None:
+        detail = f"{stage} 단계에서 요소를 찾지 못했습니다"
+        if tried:
+            detail += f" (시도한 selector: {', '.join(tried)})"
+        if reason:
+            detail += f" — {reason}"
+        super().__init__(detail)
+        self.stage = stage
+        self.tried = tuple(tried)
+        self.reason = reason
+
+
 class PlatformWarningError(TargetingError):
     """플랫폼 Warning / Challenge / 로그인 요구 감지. 즉시 자동 실행을 중단한다."""

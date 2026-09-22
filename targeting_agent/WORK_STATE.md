@@ -1,6 +1,6 @@
 # Targeting Agent 작업 상태
 
-Current Phase: 18A 완료 (Instagram Browser Discovery — 읽기 전용, 기본 OFF)
+Current Phase: 18A.1 완료 (Browser Discovery selector/진단 Hotfix — 실기 2차 Smoke 대기)
 
 Completed:
 - Phase 1: 구조 / config.yaml / .env.example / SQLite / Logging
@@ -150,11 +150,29 @@ Phase 18A 완료: Instagram Browser Discovery (읽기 전용, 기본 OFF)
 - 테스트 34개 전부 FakeBrowser 기반 — 실제 Instagram/Claude CLI 호출 없음
 - 미수행: 실 Instagram 스모크(로그인 세션이 있는 운영자 PC에서만 가능)
 
+Phase 18A.1 완료: Instagram DOM / Selector Compatibility Hotfix
+- 1차 Windows Smoke 결과: LOGGED_IN인데 검색어 5개 전부 SELECTOR_MISMATCH(20s timeout),
+  Found 0 — Playwright/세션/runner/safety는 정상, 검색 화면 selector 불일치가 원인
+- 검색 경로를 URL 추측(/explore/search/keyword/?q=) → 공개 Web UI navigation으로 교체
+  (홈 → 검색 진입 → 입력 → 결과 목록 → 해시태그(없으면 계정) 결과 페이지 → /reel/ 수집)
+- selector 우선순위를 aria-label/placeholder/role → href 패턴 → 최소 CSS로 정리,
+  한국어+영어 라벨 병기(전체 언어 목록은 넣지 않음), nth-child·해시 class 미사용
+- SelectorStage 도입: SEARCH_ENTRY / SEARCH_INPUT / SEARCH_RESULT / RESULT_PAGE /
+  REEL_LINK / POST_DETAIL / USERNAME / CAPTION — 로그에 query·stage·selector key·예외 타입
+- 디버그 스크린샷 파일명을 selector_<stage>_<timestamp>.png로 통일(기존 기능 재사용, HTML dump 없음)
+- Run 상태: SUCCESS / PARTIAL / FAILED / SESSION_STOPPED (전부 실패인데 OK로 남던 문제 수정)
+- 요약 정합성: 오류 = selector + 기타 총합, 세부 내역 함께 표시
+- 대기 전략 분리: timeout_ms(이동) vs selector_timeout_ms(기본 4초, 단계당 1회 예산)
+  → 실패 시 검색어당 ~4초(기존 20초×후보수)
+- 테스트 18개 추가(FakeDOM으로 실제 selector registry 검증) — 총 52개, 전체 348 passed
+- 미검증: 실제 Instagram DOM(개발 환경에 로그인 세션 없음) → 운영자 2차 Smoke로 확인
+
 Next: 운영 관찰 / v0.3 검토
 Meta API: Optional (진행을 막지 않음)
 
 Pending:
-- Phase 18A 실 Instagram 스모크 테스트(운영자 PC: 로그인 → --discover-only → selector 확인)
+- Phase 18A.1 2차 Smoke(운영자 PC): run_targeting_discovery.bat --discover-only --query "직장인"
+  실패 시 stage + selector key + 스크린샷만 보고(추측 반복 실행 금지)
 - 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)
 - Gemini 분석/댓글 생성 실사용 검증(API Key 필요)
 - 운영 데이터 축적 후 학습 임계값(min_keyword_media 등) 재조정

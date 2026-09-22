@@ -197,7 +197,8 @@ browser_discovery:
   enabled: false
   headless: false          # 로그인/Challenge를 사람이 볼 수 있어야 하므로 기본 false
   profile_dir: "data/browser_profile"   # 운영자 로그인 세션(git에 올리지 않는다)
-  timeout_ms: 20000
+  timeout_ms: 20000        # 페이지 이동/로딩 대기
+  selector_timeout_ms: 4000  # selector 하나를 확인하는 대기(안 맞는 selector에 오래 매달리지 않는다)
   scroll_rounds: 3
   media_types: ["REEL"]
   queries: []              # 비우면 discovery.hashtags 를 검색어로 재사용한다

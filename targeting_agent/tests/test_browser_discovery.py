@@ -17,13 +17,16 @@ from targeting_agent.discovery.browser_instagram import InstagramBrowserDiscover
 from targeting_agent.discovery.browser_models import (
     SOURCE_BROWSER_SEARCH,
     PostDetail,
+    SelectorStage,
     SessionState,
 )
 from targeting_agent.discovery.browser_runner import (
     STATUS_DISABLED,
+    STATUS_FAILED,
     STATUS_LOCKED,
-    STATUS_OK,
+    STATUS_PARTIAL,
     STATUS_SESSION_STOPPED,
+    STATUS_SUCCESS,
     format_result,
     queries_from_config,
     run_browser_discovery,
@@ -267,7 +270,10 @@ def test_selector_실패는_해당_검색어만_건너뛴다():
 
     assert len(candidates) == 1
     assert discovery.stats.selector_errors == 1
-    assert "SELECTOR_MISMATCH" in discovery.stats.queries[0].errors[0]
+    # 실패 기록에 stage / selector key / 예외 타입이 모두 보인다.
+    message = discovery.stats.queries[0].errors[0]
+    assert "stage=" in message and "type=RuntimeError" in message
+    assert discovery.stats.queries[0].failed_stage is not None
 
 
 def test_상세_화면을_읽지_못하면_후보로_만들지_않는다():
@@ -341,7 +347,7 @@ def test_수집한_후보를_기존_ingest로_저장한다(discovery_config: Con
         processor_factory=lambda cfg, c: FakeProcessor(c),
     )
 
-    assert result.status == STATUS_OK
+    assert result.status == STATUS_SUCCESS
     assert result.added == 2
     rows = conn.execute(
         "SELECT source, canonical_url FROM candidate_media ORDER BY media_pk"
@@ -414,7 +420,7 @@ def test_실행_이력을_남긴다(discovery_config: Config, conn: sqlite3.Conn
         "SELECT status, session_state, found, collected, added, claude_calls "
         "FROM browser_discovery_runs ORDER BY run_id DESC LIMIT 1"
     ).fetchone()
-    assert row["status"] == STATUS_OK
+    assert row["status"] == STATUS_SUCCESS
     assert row["session_state"] == SessionState.LOGGED_IN.value
     assert row["added"] == 1
     assert row["claude_calls"] == 1
@@ -585,3 +591,373 @@ def test_scheduler와_자동_연결되지_않는다():
     text = (PACKAGE_ROOT / "scheduler" / "runner.py").read_text(encoding="utf-8")
     assert "browser_runner" not in text
     assert "browser_discovery" not in text
+
+
+# ===========================================================================
+# Phase 18A.1 — DOM / Selector 호환성
+# ===========================================================================
+from targeting_agent.core.exceptions import SelectorMismatch  # noqa: E402
+from targeting_agent.discovery import browser_selectors as SEL  # noqa: E402
+from targeting_agent.discovery.browser_instagram import PlaywrightBrowser  # noqa: E402
+
+
+class FakeTimeout(Exception):
+    """Playwright TimeoutError 대역."""
+
+
+class FakeLocator:
+    """selector 하나에 매칭된 가짜 노드 묶음."""
+
+    def __init__(self, page: "FakePage", selector: str, nodes: list[dict]) -> None:
+        self.page = page
+        self.selector = selector
+        self.nodes = nodes
+
+    @property
+    def first(self) -> "FakeLocator":
+        return self
+
+    def count(self) -> int:
+        return len(self.nodes)
+
+    def wait_for(self, state: str = "visible", timeout: Optional[int] = None) -> None:
+        if not self.nodes:
+            raise FakeTimeout(f"Timeout {timeout}ms exceeded: {self.selector}")
+
+    def is_visible(self, timeout: Optional[int] = None) -> bool:
+        return bool(self.nodes)
+
+    def click(self, timeout: Optional[int] = None) -> None:
+        self.wait_for(timeout=timeout)
+        self.page.clicked.append(self.selector)
+
+    def fill(self, value: str, timeout: Optional[int] = None) -> None:
+        self.wait_for(timeout=timeout)
+        self.page.filled.append((self.selector, value))
+
+    def inner_text(self, timeout: Optional[int] = None) -> str:
+        self.wait_for(timeout=timeout)
+        return str(self.nodes[0].get("text", ""))
+
+    def get_attribute(self, name: str, timeout: Optional[int] = None) -> Optional[str]:
+        self.wait_for(timeout=timeout)
+        return self.nodes[0].get(name)
+
+    def evaluate_all(self, _expression: str) -> list[Optional[str]]:
+        return [node.get("href") for node in self.nodes]
+
+
+class FakeMouse:
+    def __init__(self) -> None:
+        self.scrolls = 0
+
+    def wheel(self, _x: int, _y: int) -> None:
+        self.scrolls += 1
+
+
+class FakePage:
+    """selector → 노드 목록으로 이뤄진 최소 DOM. 실제 브라우저를 쓰지 않는다."""
+
+    def __init__(self, dom: dict[str, list[dict]], gated: tuple[str, ...] = ()) -> None:
+        self.dom = dom
+        self.gated = set(gated)  # 검색어를 입력해야 나타나는 selector
+        self.url = SEL.BASE_URL + "/"
+        self.clicked: list[str] = []
+        self.filled: list[tuple[str, str]] = []
+        self.visited: list[str] = []
+        self.mouse = FakeMouse()
+        self.screenshots: list[str] = []
+
+    def locator(self, selector: str) -> FakeLocator:
+        if selector in self.gated and not self.filled:
+            return FakeLocator(self, selector, [])
+        return FakeLocator(self, selector, list(self.dom.get(selector, [])))
+
+    def goto(self, url: str, **_kwargs) -> None:
+        self.visited.append(url)
+        self.url = url
+
+    def wait_for_load_state(self, _state: str = "load") -> None:
+        pass
+
+    def wait_for_timeout(self, _ms: int) -> None:
+        pass
+
+    def inner_text(self, _selector: str) -> str:
+        return ""
+
+    def set_default_timeout(self, _ms: int) -> None:
+        pass
+
+    def screenshot(self, path: str) -> None:
+        self.screenshots.append(path)
+
+
+def make_browser(page: FakePage, tmp_path: Path, **kwargs) -> PlaywrightBrowser:
+    browser = PlaywrightBrowser(
+        profile_dir=tmp_path / "profile",
+        headless=True,
+        selector_timeout_ms=10,
+        debug_dir=tmp_path / "debug",
+        **kwargs,
+    )
+    browser._page = page
+    return browser
+
+
+def search_dom(entry: str, input_selector: str) -> dict[str, list[dict]]:
+    """검색 진입 → 입력 → 해시태그 결과 → 결과 페이지까지의 최소 DOM."""
+    return {
+        entry: [{"text": "검색"}],
+        input_selector: [{"text": ""}],
+        SEL.SEARCH_RESULT_HASHTAG[0][1]: [{"href": "/explore/tags/직장인/"}],
+        SEL.RESULT_PAGE_MARKERS[0][1]: [{"href": "/reel/AAA111/"}],
+    }
+
+
+def test_한국어_ui_검색_라벨로_진입한다(tmp_path: Path):
+    entry = dict(SEL.SEARCH_ENTRY)["nav_search_aria_ko"]
+    box = dict(SEL.SEARCH_INPUT)["input_placeholder_ko"]
+    page = FakePage(search_dom(entry, box), gated=(SEL.SEARCH_RESULT_HASHTAG[0][1],))
+
+    make_browser(page, tmp_path).search("직장인")
+
+    assert page.clicked[0] == entry
+    assert page.filled == [(box, "직장인")]
+
+
+def test_영어_ui_검색_라벨로도_진입한다(tmp_path: Path):
+    entry = dict(SEL.SEARCH_ENTRY)["nav_search_aria_en"]
+    box = dict(SEL.SEARCH_INPUT)["input_placeholder_en"]
+    page = FakePage(search_dom(entry, box), gated=(SEL.SEARCH_RESULT_HASHTAG[0][1],))
+
+    make_browser(page, tmp_path).search("직장인")
+
+    assert page.clicked[0] == entry
+
+
+def test_검색_입력_selector는_대체안으로_넘어간다(tmp_path: Path):
+    entry = dict(SEL.SEARCH_ENTRY)["nav_search_svg_ko"]
+    box = dict(SEL.SEARCH_INPUT)["input_role_searchbox"]  # placeholder 계열이 없는 경우
+    page = FakePage(search_dom(entry, box), gated=(SEL.SEARCH_RESULT_HASHTAG[0][1],))
+
+    make_browser(page, tmp_path).search("직장인")
+
+    assert page.filled == [(box, "직장인")]
+
+
+def test_해시태그_결과가_없으면_계정_결과로_넘어간다(tmp_path: Path):
+    entry = dict(SEL.SEARCH_ENTRY)["nav_search_aria_ko"]
+    box = dict(SEL.SEARCH_INPUT)["input_placeholder_ko"]
+    account = dict(SEL.SEARCH_RESULT_ACCOUNT)["result_account_link"]
+    dom = {
+        entry: [{"text": "검색"}],
+        box: [{"text": ""}],
+        account: [{"href": "/office_daily_kim/"}],
+        SEL.RESULT_PAGE_MARKERS[0][1]: [{"href": "/reel/AAA111/"}],
+    }
+    page = FakePage(dom, gated=(account,))
+
+    make_browser(page, tmp_path).search("직장인")
+
+    assert account in page.clicked
+
+
+def test_검색_입력을_못_찾으면_stage와_selector키를_알려준다(tmp_path: Path):
+    entry = dict(SEL.SEARCH_ENTRY)["nav_search_aria_ko"]
+    page = FakePage({entry: [{"text": "검색"}]})  # 입력 필드 없음
+    browser = make_browser(page, tmp_path)
+
+    with pytest.raises(SelectorMismatch) as exc:
+        browser.search("직장인")
+
+    assert exc.value.stage == SelectorStage.SEARCH_INPUT.value
+    assert "input_placeholder_ko" in exc.value.tried
+    assert page.screenshots and "search_input" in page.screenshots[0]
+
+
+def test_검색_진입_실패도_stage로_구분된다(tmp_path: Path):
+    browser = make_browser(FakePage({}), tmp_path)
+
+    with pytest.raises(SelectorMismatch) as exc:
+        browser.search("직장인")
+
+    assert exc.value.stage == SelectorStage.SEARCH_ENTRY.value
+
+
+def test_reel_href만_수집하고_중복을_제거한다(tmp_path: Path):
+    selector = dict(SEL.POST_LINK_SELECTORS)["reel_href"]
+    page = FakePage(
+        {
+            selector: [
+                {"href": "/reel/AAA111/"},
+                {"href": "/reel/AAA111/"},  # 같은 링크가 두 번 보이는 경우
+                {"href": "https://www.instagram.com/reel/BBB222/"},
+            ]
+        }
+    )
+
+    links = make_browser(page, tmp_path).collect_post_links(10)
+
+    assert links == [
+        "https://www.instagram.com/reel/AAA111/",
+        "https://www.instagram.com/reel/BBB222/",
+    ]
+
+
+def test_reel_링크가_하나도_없으면_stage를_알려준다(tmp_path: Path):
+    browser = make_browser(FakePage({}), tmp_path, scroll_rounds=1)
+
+    with pytest.raises(SelectorMismatch) as exc:
+        browser.collect_post_links(10)
+
+    assert exc.value.stage == SelectorStage.REEL_LINK.value
+
+
+def test_상세에서_username과_caption을_읽는다(tmp_path: Path):
+    username_sel = dict(SEL.USERNAME_SELECTORS)["username_header_link"]
+    caption_sel = dict(SEL.CAPTION_SELECTORS)["caption_h1"]
+    page = FakePage(
+        {
+            username_sel: [{"href": "/office_daily_kim/"}],
+            caption_sel: [{"text": "퇴근 후 카페 #직장인 #일상"}],
+        }
+    )
+
+    post = make_browser(page, tmp_path).open_post("https://www.instagram.com/reel/AAA111/")
+
+    assert post is not None
+    assert post.username == "office_daily_kim"
+    assert post.caption == "퇴근 후 카페 #직장인 #일상"
+    assert post.hashtags == ["직장인", "일상"]
+
+
+def test_caption을_못_찾으면_빈_값으로_두고_추측하지_않는다(tmp_path: Path):
+    username_sel = dict(SEL.USERNAME_SELECTORS)["username_header_link"]
+    page = FakePage({username_sel: [{"href": "/office_daily_kim/"}]})
+
+    post = make_browser(page, tmp_path).open_post("https://www.instagram.com/reel/AAA111/")
+
+    assert post is not None
+    assert post.caption == ""
+    assert post.hashtags == []
+
+
+def test_상세를_전혀_못_읽으면_none과_스크린샷(tmp_path: Path):
+    page = FakePage({})
+    browser = make_browser(page, tmp_path)
+
+    assert browser.open_post("https://www.instagram.com/reel/AAA111/") is None
+    assert page.screenshots and "post_detail" in page.screenshots[0]
+
+
+def test_caption이_없으면_needs_enrichment로_저장된다(
+    discovery_config: Config, conn: sqlite3.Connection
+):
+    url = "https://www.instagram.com/reel/AAA111/"
+    browser = FakeBrowser(
+        links={"직장인": [url]},
+        details={url: PostDetail(permalink=url, username="office_daily_kim", caption="")},
+    )
+
+    result = run_browser_discovery(
+        discovery_config, conn, browser=browser, processor_factory=lambda cfg, c: FakeProcessor(c)
+    )
+
+    assert result.added == 1
+    status = conn.execute("SELECT status FROM candidate_media").fetchone()["status"]
+    assert status == "NEEDS_ENRICHMENT"
+
+
+# --- Run 상태 --------------------------------------------------------------
+def test_모든_검색어_성공이면_success(discovery_config: Config, conn: sqlite3.Connection):
+    result = run_browser_discovery(
+        discovery_config,
+        conn,
+        browser=browser_with(["AAA111"]),
+        processor_factory=lambda cfg, c: FakeProcessor(c),
+    )
+
+    assert result.status == STATUS_SUCCESS
+    assert (result.ok_queries, result.failed_queries) == (1, 0)
+
+
+def test_일부_검색어만_실패하면_partial(discovery_config: Config, conn: sqlite3.Connection):
+    good = "https://www.instagram.com/reel/AAA111/"
+    browser = FakeBrowser(
+        links={"good": [good]}, details={good: detail("AAA111")}, fail_queries=("bad",)
+    )
+
+    result = run_browser_discovery(
+        discovery_config,
+        conn,
+        browser=browser,
+        queries=["bad", "good"],
+        processor_factory=lambda cfg, c: FakeProcessor(c),
+    )
+
+    assert result.status == STATUS_PARTIAL
+    assert (result.ok_queries, result.failed_queries) == (1, 1)
+    assert result.exit_code == 0
+
+
+def test_모든_검색어가_실패하면_failed(discovery_config: Config, conn: sqlite3.Connection):
+    browser = FakeBrowser(fail_queries=("a", "b"))
+
+    result = run_browser_discovery(discovery_config, conn, browser=browser, queries=["a", "b"])
+
+    assert result.status == STATUS_FAILED
+    assert result.failed_queries == 2
+    assert result.exit_code == 1
+    row = conn.execute(
+        "SELECT status FROM browser_discovery_runs ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()
+    assert row["status"] == STATUS_FAILED
+
+
+def test_오류_합계가_세부_건수와_일치한다(discovery_config: Config, conn: sqlite3.Connection):
+    browser = FakeBrowser(fail_queries=("a", "b"))
+
+    result = run_browser_discovery(discovery_config, conn, browser=browser, queries=["a", "b"])
+    text = format_result(result)
+
+    assert result.selector_errors == 2
+    assert result.other_errors == 0
+    assert result.errors == result.selector_errors + result.other_errors
+    assert " 오류        : 2" in text
+    assert "- Selector : 2" in text
+
+
+def test_검색어를_하나만_주면_하나만_실행한다(discovery_config: Config, conn: sqlite3.Connection):
+    from targeting_agent.main import build_parser
+
+    args = build_parser().parse_args(["--discover-only", "--query", "직장인"])
+    assert args.query == ["직장인"]
+
+    # config에는 기본 검색어가 5개 들어 있는 상태를 만든다.
+    raw = {**discovery_config.raw}
+    raw["browser_discovery"] = {
+        **raw["browser_discovery"],
+        "queries": ["직장인", "직장인브이로그", "회사원", "출근", "퇴근"],
+    }
+    many = Config(raw=raw, path=discovery_config.path, base_dir=discovery_config.base_dir)
+    assert len(queries_from_config(many)) == 5
+
+    browser = browser_with(["AAA111"])
+    result = run_browser_discovery(
+        many, conn, browser=browser, queries=args.query, process=False
+    )
+    assert result.queries == 1
+    assert [c[1] for c in browser.calls if c[0] == "search"] == ["직장인"]
+    assert result.claude_calls == 0
+
+
+def test_discover_only는_instagram_동작이_0이다(discovery_config: Config, conn: sqlite3.Connection):
+    browser = browser_with(["AAA111"])
+
+    run_browser_discovery(discovery_config, conn, browser=browser, process=False)
+
+    used = {call[0] for call in browser.calls}
+    assert used <= {"session_state", "search", "collect", "open_post"}
+    assert conn.execute("SELECT COUNT(*) AS n FROM action_queue").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) AS n FROM interactions").fetchone()["n"] == 0

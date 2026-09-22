@@ -129,6 +129,12 @@ run_targeting_discovery.bat --discover-only  REM 수집·저장까지만(Claude 
 - 수집된 후보는 `source='instagram_browser_search'`로 저장되어 기존 분석·Dashboard 승인
   흐름을 그대로 탄다. 중복 후보는 다시 분석하지 않는다.
 - **Scheduler와 자동 연결하지 않는다.** Scheduled Run은 브라우저를 열지 않는다.
+- 화면 구조가 바뀌어 실패하면 `stage`(예: `SEARCH_INPUT_NOT_FOUND`)와 selector 키를 출력하고
+  `data/browser_debug/selector_<stage>_<시각>.png` 스크린샷 1장을 남긴다.
+  selector는 `discovery/browser_selectors.py` 한 곳에서만 고친다.
+- Run 상태: `SUCCESS`(전부 성공) / `PARTIAL`(일부 실패) / `FAILED`(전부 실패) /
+  `SESSION_STOPPED`(로그인·Challenge·경고).
+- 단일 검색어 확인: `run_targeting_discovery.bat --discover-only --query "직장인"`
 - 자세한 내용은 `docs/phase18a_browser_discovery.md` 참고.
 
 > 로그인 상태의 자동 수집은 Instagram 이용약관의 자동화 수집 조항에 저촉될 수 있고,

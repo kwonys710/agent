@@ -33,6 +33,24 @@ STOP_STATES = (
 )
 
 
+class SelectorStage(str, Enum):
+    """검색 흐름의 단계. 실패했을 때 "어디서" 막혔는지 그대로 보고한다(Phase 18A.1)."""
+
+    SEARCH_ENTRY = "SEARCH_ENTRY_NOT_FOUND"
+    SEARCH_INPUT = "SEARCH_INPUT_NOT_FOUND"
+    SEARCH_RESULT = "SEARCH_RESULT_NOT_FOUND"
+    RESULT_PAGE = "RESULT_PAGE_NOT_FOUND"
+    REEL_LINK = "REEL_LINK_NOT_FOUND"
+    POST_DETAIL = "POST_DETAIL_NOT_FOUND"
+    USERNAME = "USERNAME_NOT_FOUND"
+    CAPTION = "CAPTION_NOT_FOUND"
+
+    @property
+    def short(self) -> str:
+        """스크린샷 파일명에 쓸 짧은 이름."""
+        return self.name.lower()
+
+
 @dataclass
 class PostDetail:
     """게시물 상세 화면에서 읽은 공개 정보."""
@@ -58,6 +76,16 @@ class QueryResult:
     found: int = 0
     collected: int = 0
     errors: list[str] = field(default_factory=list)
+    failed_stage: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        """검색 흐름이 끝까지 돈 검색어.
+
+        후보를 하나라도 수집했으면 성공으로 본다(게시물 1건의 상세 실패는 검색어 실패가 아니다).
+        수집이 0건인데 오류가 있으면 실패다 — 수집 0건 자체는 실패가 아니다.
+        """
+        return self.collected > 0 or not self.errors
 
 
 @dataclass
@@ -76,3 +104,11 @@ class DiscoveryStats:
         self.found += result.found
         self.collected += result.collected
         self.selector_errors += len(result.errors)
+
+    @property
+    def ok_queries(self) -> int:
+        return sum(1 for q in self.queries if q.ok)
+
+    @property
+    def failed_queries(self) -> int:
+        return sum(1 for q in self.queries if not q.ok)

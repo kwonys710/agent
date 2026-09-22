@@ -29,18 +29,22 @@ from .ingest import ADDED, CandidateIngestor, ImportSummary
 
 logger = get_logger("discovery.browser_runner")
 
-STATUS_OK = "OK"
+# Run 상태(18A.1). 검색어가 전부 실패했는데 OK로 남던 문제를 고친다.
+STATUS_SUCCESS = "SUCCESS"          # 실행한 검색어가 모두 성공
+STATUS_PARTIAL = "PARTIAL"          # 성공/실패 검색어가 섞임
+STATUS_FAILED = "FAILED"            # 실행한 검색어가 전부 실패(또는 실행 자체 실패)
+STATUS_SESSION_STOPPED = "SESSION_STOPPED"
 STATUS_LOCKED = "LOCKED"
 STATUS_DISABLED = "DISABLED"
-STATUS_SESSION_STOPPED = "SESSION_STOPPED"
-STATUS_FAILED = "FAILED"
+# 이전 이름(OK)은 SUCCESS와 같은 의미로 남겨 둔다.
+STATUS_OK = STATUS_SUCCESS
 
 
 @dataclass
 class BrowserDiscoveryResult:
     """Browser Discovery Run 1회 결과."""
 
-    status: str = STATUS_OK
+    status: str = STATUS_SUCCESS
     started_at: str = ""
     finished_at: str = ""
     session_state: str = SessionState.UNKNOWN.value
@@ -54,19 +58,24 @@ class BrowserDiscoveryResult:
     needs_enrichment: int = 0
     claude_calls: int = 0
     cache_hits: int = 0
-    errors: int = 0
-    selector_errors: int = 0
+    other_errors: int = 0      # 저장/분석 단계 오류
+    selector_errors: int = 0   # 화면 구조(selector) 오류
+    ok_queries: int = 0
+    failed_queries: int = 0
     stop_reason: Optional[str] = None
     message: str = ""
     added_media_pks: list[int] = field(default_factory=list)
     details: list[str] = field(default_factory=list)
 
     @property
+    def errors(self) -> int:
+        """화면 오류 + 처리 오류의 총합(요약의 '오류' 숫자와 세부 항목을 일치시킨다)."""
+        return self.other_errors + self.selector_errors
+
+    @property
     def exit_code(self) -> int:
-        """후보 1건의 실패는 실패로 보지 않는다. 실행 자체가 막혔을 때만 non-zero."""
-        if self.status in (STATUS_OK, STATUS_DISABLED):
-            return 0
-        if self.status == STATUS_LOCKED:
+        """후보 1건의 실패는 실패로 보지 않는다. 실행이 목적을 이루지 못했을 때만 non-zero."""
+        if self.status in (STATUS_SUCCESS, STATUS_PARTIAL, STATUS_DISABLED, STATUS_LOCKED):
             return 0
         return 1
 
@@ -85,6 +94,7 @@ def _default_browser(config: Config) -> Any:
         ),
         headless=bool(config.get("browser_discovery.headless", False)),
         timeout_ms=int(config.get("browser_discovery.timeout_ms", 20000)),
+        selector_timeout_ms=int(config.get("browser_discovery.selector_timeout_ms", 4000)),
         debug_dir=(
             config._resolve_path(config.get("browser_discovery.debug.dir", "data/browser_debug"))
             if bool(config.get("browser_discovery.debug.enabled", True))
@@ -164,6 +174,7 @@ def run_browser_discovery(
 
         query_list = list(queries) if queries else queries_from_config(config)
         if not query_list:
+            result.status = STATUS_FAILED
             result.message = "검색어가 없습니다(browser_discovery.queries / discovery.hashtags)."
             logger.warning(result.message)
             return result
@@ -251,10 +262,22 @@ def _discover(
     result.found = stats.found
     result.collected = stats.collected
     result.selector_errors = stats.selector_errors
+    result.ok_queries = stats.ok_queries
+    result.failed_queries = stats.failed_queries
+    result.status = _status_of(stats.ok_queries, stats.failed_queries)
     for query in stats.queries:
         for message in query.errors:
             result.details.append(f"query={query.query} {message}")
     return candidates
+
+
+def _status_of(ok_queries: int, failed_queries: int) -> str:
+    """검색어 성공/실패 비율로 Run 상태를 정한다(전부 실패인데 OK로 남지 않게 한다)."""
+    if failed_queries and ok_queries:
+        return STATUS_PARTIAL
+    if failed_queries:
+        return STATUS_FAILED
+    return STATUS_SUCCESS
 
 
 def _ingest(
@@ -276,7 +299,7 @@ def _ingest(
     result.added = summary.added
     result.duplicate = summary.duplicate
     result.invalid = summary.invalid
-    result.errors += summary.error
+    result.other_errors += summary.error
     return summary
 
 
@@ -299,11 +322,11 @@ def _process(
         except Exception as exc:  # noqa: BLE001 - 후보 1건 실패가 Run을 멈추지 않게 한다
             logger.exception("후보 처리 실패: media_pk=%s", media_pk)
             conn.rollback()
-            result.errors += 1
+            result.other_errors += 1
             result.details.append(f"media_pk={media_pk} ERROR {str(exc)[:80]}")
             continue
         if outcome.status == "ERROR":
-            result.errors += 1
+            result.other_errors += 1
             result.details.append(f"media_pk={media_pk} ERROR {outcome.detail[:80]}")
         elif outcome.status == "NEEDS_ENRICHMENT":
             result.needs_enrichment += 1
@@ -366,12 +389,14 @@ def format_result(result: BrowserDiscoveryResult) -> str:
         "=" * 52,
         f" 상태        : {result.status}",
         f" 세션        : {result.session_state}",
-        f" 검색어      : {result.queries}개",
+        f" 검색어      : {result.queries}개 (성공 {result.ok_queries} / 실패 {result.failed_queries})",
         f" 발견 / 수집 : {result.found} / {result.collected}",
         f" 신규 / 중복 : {result.added} / {result.duplicate}",
         f" 분석 완료   : {result.analyzed} (정보 부족 {result.needs_enrichment})",
         f" Claude 호출 : {result.claude_calls} (Cache Hit {result.cache_hits})",
-        f" 오류        : {result.errors} (selector {result.selector_errors})",
+        f" 오류        : {result.errors}",
+        f"   - Selector : {result.selector_errors}",
+        f"   - 기타     : {result.other_errors}",
     ]
     if result.stop_reason:
         lines.append(f" 중단 사유   : {result.stop_reason}")

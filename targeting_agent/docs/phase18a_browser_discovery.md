@@ -106,3 +106,75 @@ selector는 `discovery/browser_selectors.py` 한 곳에만 둔다. 화면이 바
   계정 제재 위험은 **운영자 계정이 진다**. 이 기능을 쓸지는 운영자가 결정한다.
 - 화면 구조는 예고 없이 바뀐다. selector 실패가 반복되면 수집량이 0이 될 수 있다.
 - 실 Instagram 스모크 테스트는 로그인 세션이 있는 운영자 PC에서만 가능하다.
+
+---
+
+# Phase 18A.1 — DOM / Selector Compatibility Hotfix
+
+작성일: 2026-09-22 / 계기: Windows 실기 Smoke Test 1차
+
+## 1. 1차 Smoke 결과
+
+```
+Session LOGGED_IN / Queries 5 / Found 0 / Collected 0 / Selector Err 5 / Claude 0
+검색어 5개 전부 SELECTOR_MISMATCH TimeoutError 20000ms
+```
+
+Playwright·persistent session·runner·safety는 정상. 실패 원인은 **검색 화면 selector 불일치**였다.
+
+## 2. 고친 것
+
+| # | 문제 | 조치 |
+| --- | --- | --- |
+| A | 검색 경로가 `/explore/search/keyword/?q=` URL 추측에 의존 | 공개 Web UI navigation(홈 → 검색 진입 → 입력 → 결과 → 공개 결과 페이지)으로 교체 |
+| B | selector가 영어 UI·CSS 추정에 치우침 | aria-label/placeholder/role 우선, 한국어+영어 라벨 병기, `/reel/`·`/explore/tags/` href 패턴 사용 |
+| C | 실패가 `SELECTOR_MISMATCH` 한 줄뿐 | `SelectorStage`로 단계 구분 + `query / stage / selector key / 예외 타입` 로그 + 단계별 스크린샷 |
+| D | 모든 검색어가 실패해도 Run status가 `OK` | `SUCCESS / PARTIAL / FAILED / SESSION_STOPPED`로 구분 |
+| E | 안 맞는 selector 하나마다 20초 대기(5검색어 100초 이상) | 이동 대기(`timeout_ms`)와 selector 확인(`selector_timeout_ms`, 기본 4초)을 분리하고 **단계당 한 번만** 예산 사용 |
+| F | 요약의 "오류 0 (selector 5)" 불일치 | `오류 = selector + 기타` 총합으로 표시하고 세부 내역을 함께 출력 |
+
+## 3. 검색 단계와 실패 코드
+
+| Stage | 의미 |
+| --- | --- |
+| `SEARCH_ENTRY_NOT_FOUND` | 홈에서 검색 진입 요소를 못 찾음 |
+| `SEARCH_INPUT_NOT_FOUND` | 검색 입력 필드를 못 찾음 |
+| `SEARCH_RESULT_NOT_FOUND` | 결과 목록(해시태그/계정)을 못 찾음 |
+| `RESULT_PAGE_NOT_FOUND` | 결과 페이지 진입 확인 실패 |
+| `REEL_LINK_NOT_FOUND` | 결과 페이지에서 `/reel/` 링크 0건 |
+| `POST_DETAIL_NOT_FOUND` | 게시물 상세를 전혀 읽지 못함 |
+| `USERNAME_NOT_FOUND` / `CAPTION_NOT_FOUND` | 개별 항목 읽기 실패(추측하지 않고 비움) |
+
+로그 예: `검색어 '직장인' 실패: stage=SEARCH_INPUT_NOT_FOUND keys=input_placeholder_ko,... type=TimeoutError`
+스크린샷 예: `data/browser_debug/selector_search_input_20260922_161612.png` (git 제외, 자동 업로드 없음)
+
+## 4. Run 상태
+
+| 상태 | 의미 | exit code |
+| --- | --- | --- |
+| `SUCCESS` | 실행한 검색어가 모두 성공 | 0 |
+| `PARTIAL` | 성공·실패 혼재 | 0 |
+| `FAILED` | 실행한 검색어가 전부 실패 / 실행 자체 실패 | 1 |
+| `SESSION_STOPPED` | 로그인 필요·Challenge·경고 | 1 |
+| `LOCKED` / `DISABLED` | 중복 실행 / 기능 꺼짐 | 0 |
+
+검색어 하나가 후보를 하나라도 수집했으면 그 검색어는 성공으로 본다
+(게시물 1건의 상세 실패는 검색어 실패가 아니다).
+
+## 5. 2차 Smoke Test 절차 (운영자 PC)
+
+```bat
+run_targeting_discovery.bat --discover-only --query "직장인"
+```
+
+- 검색어 **1개만** 사용한다(5개 반복 금지). `--query` 하나면 config 기본 검색어는 실행되지 않는다.
+- 후보를 3개로 줄이려면 `browser_discovery.limits.max_candidates_per_query: 3`.
+- 기대: `Session LOGGED_IN / Queries 1 / Claude 0 / Instagram Action 0`.
+- 실패하면 **selector를 추측해 반복 실행하지 말고**, 출력의 `stage` + `keys`와
+  `data/browser_debug/`의 스크린샷을 그대로 보고한다. 전체 HTML dump는 하지 않는다.
+
+## 6. 남은 한계
+
+selector는 공개 UI 관례(aria-label/placeholder/href) 기준으로 맞췄을 뿐,
+개발 환경에서는 로그인 세션이 없어 실제 DOM으로 검증하지 못했다.
+최종 확인은 운영자 PC의 2차 Smoke Test다.

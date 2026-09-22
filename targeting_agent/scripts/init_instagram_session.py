@@ -58,6 +58,7 @@ def check_session(config) -> SessionState:
         profile_dir=_profile_dir(config),
         headless=bool(config.get("browser_discovery.headless", False)),
         timeout_ms=int(config.get("browser_discovery.timeout_ms", 20000)),
+        selector_timeout_ms=int(config.get("browser_discovery.selector_timeout_ms", 4000)),
     )
     browser.start()
     try:
