@@ -63,6 +63,8 @@ class PostDetail:
     # 페이지가 스스로 밝힌 canonical permalink(`link[rel="canonical"]`).
     # /p/<code>/ 로 열어도 Reel이면 /reel/<code>/ 로 나온다 — 비면 추측하지 않는다.
     canonical_url: str = ""
+    # 게시 날짜 'YYYY-MM-DD'. 못 읽으면 빈 문자열 — Scorer가 '모른다'로 다룬다.
+    posted_at: str = ""
     like_count: int = 0
     comment_count: int = 0
 

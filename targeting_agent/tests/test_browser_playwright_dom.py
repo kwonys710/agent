@@ -224,6 +224,7 @@ def test_2026_상세는_canonical과_메타태그로_읽는다(browser: Playwrig
     assert post.caption.startswith("퇴근 후 카페에서 마무리")
     assert post.hashtags == ["직장인", "퇴근후", "카페"]
     assert post.like_count == 9367 and post.comment_count == 62
+    assert post.posted_at == "2026-08-23"  # Scorer의 activity 축이 '모름'을 벗어난다(18D.2)
     # 화면에 섞여 있는 댓글 텍스트를 caption으로 가져오지 않는다.
     assert "저도 그 카페" not in post.caption
 

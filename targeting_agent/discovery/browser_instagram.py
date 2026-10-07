@@ -423,6 +423,7 @@ class PlaywrightBrowser:
             media_type=media_type,
             like_count=meta.like_count or 0,
             comment_count=meta.comment_count or 0,
+            posted_at=meta.posted_at,
         )
 
     def _attr_one(self, selector: str, attribute: str) -> str:
@@ -715,6 +716,8 @@ class InstagramBrowserDiscovery(DiscoverySource):
         )
         candidate.like_count = detail.like_count
         candidate.comment_count = detail.comment_count
+        # 게시 시각을 알면 Scorer의 activity 축이 '모름(중립값)'에서 벗어난다(18D.2).
+        candidate.posted_at = detail.posted_at or None
         candidate.extra["source_query"] = query
         self._sample(
             result,

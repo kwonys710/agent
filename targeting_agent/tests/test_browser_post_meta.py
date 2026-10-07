@@ -59,3 +59,40 @@ def test_읽을_게_없으면_비워_둔다(desc: str, title: str):
     assert meta.empty
     assert meta.username == "" and meta.caption == ""
     assert meta.like_count is None and meta.comment_count is None
+
+
+# ===========================================================================
+# Phase 18D.2 — 게시 날짜를 읽어 Scorer의 activity 축을 '모름'에서 꺼낸다
+# ===========================================================================
+def test_게시_날짜를_읽는다():
+    meta = parse_post_meta(og_description=REAL_DESC)
+
+    assert meta.posted_at == "2026-08-23"
+
+
+def test_형식이_다른_날짜는_지어내지_않는다():
+    """한국어 형식으로 나오면 읽지 않는다 — 틀린 날짜가 모르는 것보다 나쁘다."""
+    meta = parse_post_meta(
+        og_description='좋아요 100개, 댓글 2개 - office_daily_kim - 2025년 11월 7일: "본문"'
+    )
+
+    assert meta.posted_at == ""
+
+
+def test_날짜가_없으면_비워_둔다():
+    meta = parse_post_meta(og_description='- office_daily_kim - : "본문"')
+
+    assert meta.posted_at == ""
+
+
+def test_반응수가_없는_형태도_읽는다():
+    """반응 수가 없으면 og:description이 username부터 바로 시작한다(실기 확인).
+
+    이 형태를 놓치면 날짜를 못 읽어 Scorer의 activity 축이 '모름'으로 남는다.
+    """
+    meta = parse_post_meta(og_description='leegs0224 - October 5, 2026: "#출근길". ')
+
+    assert meta.username == "leegs0224"
+    assert meta.posted_at == "2026-10-05"
+    assert meta.caption == "#출근길"
+    assert meta.like_count is None and meta.comment_count is None
