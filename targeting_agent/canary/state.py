@@ -26,9 +26,17 @@ STATE_FILENAME = "live_canary_state.json"
 
 NOT_STARTED = "NOT_STARTED"
 ARMED = "ARMED"
+# 18E.1 — 아직 실제로 누를 수 없는 이유를 상태로 구분한다.
+# 둘 다 실패가 아니라 "기다리는 중"이다.
+WAITING_AI_BUDGET = "WAITING_AI_BUDGET"      # Claude 일일 한도를 다 썼다
+WAITING_ELIGIBLE = "WAITING_ELIGIBLE"        # 임계값을 넘는 실제 후보가 없다
+READY_FOR_REHEARSAL = "READY_FOR_REHEARSAL"
+READY_FOR_LIVE = "READY_FOR_LIVE"
 RUNNING = "RUNNING"
 WAITING_NEXT_RUN = "WAITING_NEXT_RUN"
 COMPLETED = "COMPLETED"
+EXPIRED_NO_ELIGIBLE = "EXPIRED_NO_ELIGIBLE"
+STOPPED_SAFETY = "STOPPED_SAFETY"
 STOPPED_WARNING = "STOPPED_WARNING"
 STOPPED_CHALLENGE = "STOPPED_CHALLENGE"
 STOPPED_ACTION_BLOCK = "STOPPED_ACTION_BLOCK"
@@ -41,6 +49,8 @@ FAILED = "FAILED"
 TERMINAL_STATES = frozenset(
     {
         COMPLETED,
+        EXPIRED_NO_ELIGIBLE,
+        STOPPED_SAFETY,
         STOPPED_WARNING,
         STOPPED_CHALLENGE,
         STOPPED_ACTION_BLOCK,
@@ -50,6 +60,10 @@ TERMINAL_STATES = frozenset(
         FAILED,
     }
 )
+
+
+# 기다리는 중일 뿐 끝난 것이 아닌 상태. Runner가 다시 진입해 이어간다.
+WAITING_STATES = frozenset({WAITING_AI_BUDGET, WAITING_ELIGIBLE, WAITING_NEXT_RUN})
 
 
 def _now() -> datetime:
@@ -77,9 +91,16 @@ class CanaryState:
 
     canary_id: str = ""
     status: str = NOT_STARTED
+    # created_at: Canary를 만든 때. 여기부터 48시간을 세면, 후보가 없어서
+    # 기다리는 동안 창이 다 지나가 **한 번도 못 눌러 보고** 만료된다.
+    # 그래서 48시간은 live_started_at(처음 실제로 누른 때)부터 센다(18E.1 §21).
     started_at: str = ""
+    live_started_at: str = ""
     ends_at: str = ""
     last_run_at: str = ""
+    last_waiting_reason: str = ""
+    rehearsal_passed_at: str = ""
+    discovery_runs: int = 0
     total_live_likes: int = 0
     today_live_likes: int = 0
     today_date: str = ""
@@ -96,6 +117,13 @@ class CanaryState:
 
     # --- 시간 ------------------------------------------------------------
     def is_expired(self, *, now: Optional[datetime] = None) -> bool:
+        """창이 **열린 뒤에만** 만료를 따진다.
+
+        한 번도 눌러 보지 못한 Canary는 만료될 수 없다 — 기다린 시간은
+        쓰기 기간이 아니다.
+        """
+        if not self.live_started_at:
+            return False
         ends = _parse(self.ends_at)
         return bool(ends and (now or _now()) >= ends)
 
@@ -154,6 +182,16 @@ class CanaryState:
         if media_pk and media_pk not in self.review_backlog:
             self.review_backlog.append(int(media_pk))
 
+    @property
+    def live_window_open(self) -> bool:
+        """실제 쓰기 창이 열렸는지. 열리기 전에는 만료도 없다."""
+        return bool(self.live_started_at)
+
+    def wait(self, status: str, reason: str) -> None:
+        """기다리는 상태로 둔다. 끝난 것이 아니므로 종료 시각을 찍지 않는다."""
+        self.status = status
+        self.last_waiting_reason = reason
+
     def stop(self, status: str, reason: str, *, now: Optional[datetime] = None) -> None:
         self.status = status
         self.stop_reason = reason
@@ -177,7 +215,14 @@ class CanaryState:
         return {
             "Canary ID": self.canary_id or "-",
             "상태": self.status,
-            "기간": f"{self.started_at or '-'} ~ {self.ends_at or '-'}",
+            "생성": self.started_at or "-",
+            "LIVE 창": (
+                f"{self.live_started_at} ~ {self.ends_at}"
+                if self.live_started_at
+                else "아직 열리지 않음(첫 실제 시도 때 48시간 시작)"
+            ),
+            "대기 사유": self.last_waiting_reason or "-",
+            "리허설 통과": self.rehearsal_passed_at or "-",
             "실제 LIKE (확인됨)": f"{self.total_live_likes} / {self.max_total}",
             "오늘": f"{self.today_live_likes} / {self.max_per_day} ({self.today_date or '-'})",
             "1회 상한": str(self.max_per_run),
@@ -216,13 +261,26 @@ def save_state(path: Path, state: CanaryState) -> None:
 
 
 def arm(state: CanaryState, *, now: Optional[datetime] = None) -> CanaryState:
-    """Canary를 시작 상태로 만든다(아직 아무 것도 누르지 않는다)."""
+    """Canary를 만든다. **48시간 창은 아직 열지 않는다.**
+
+    후보가 없거나 AI 한도가 비어 기다리는 동안 창이 흘러가면, 정작 누를 수
+    있게 됐을 때 이미 만료돼 있다. 창은 `start_live_window()`에서 연다.
+    """
     moment = now or _now()
     if state.status != NOT_STARTED:
         return state
     state.canary_id = moment.strftime("canary-%Y%m%d-%H%M%S")
     state.status = ARMED
     state.started_at = moment.isoformat(timespec="seconds")
-    state.ends_at = (moment + timedelta(hours=CANARY_HOURS)).isoformat(timespec="seconds")
     state.roll_day(now=moment)
+    return state
+
+
+def start_live_window(state: CanaryState, *, now: Optional[datetime] = None) -> CanaryState:
+    """**처음 실제로 누르려는 순간** 48시간 창을 연다(한 번만)."""
+    if state.live_started_at:
+        return state
+    moment = now or _now()
+    state.live_started_at = moment.isoformat(timespec="seconds")
+    state.ends_at = (moment + timedelta(hours=CANARY_HOURS)).isoformat(timespec="seconds")
     return state

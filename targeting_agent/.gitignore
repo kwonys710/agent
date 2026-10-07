@@ -26,3 +26,4 @@ data/.scheduler.lock
 data/reports/
 # Live Canary 진행 상태(실행 산출물 — 이 파일이 실제 한도의 마지막 방어선이다)
 data/live_canary_state.json
+data/.canary_resume.lock

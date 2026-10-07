@@ -127,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Live Canary 진행 상태만 출력한다(아무 것도 실행하지 않는다)",
     )
     parser.add_argument(
+        "--canary-resume",
+        action="store_true",
+        help="Canary 이어가기: 후보 확보 → 리허설 → 제한된 실제 LIKE(가능할 때만)",
+    )
+    parser.add_argument(
         "--discover",
         action="store_true",
         help="Browser Discovery: Instagram 검색으로 Reel 후보 수집 → 저장 → 분석(읽기 전용)",
@@ -565,6 +570,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(format_canary_report(canary_report))
         print(f"보고서: {path}")
         return 0
+
+    if args.canary_resume:
+        from .canary.report import (
+            build_canary_report,
+            render_canary_html,
+            write_canary_report,
+        )
+        from .canary.resume import format_resume, resume_canary
+
+        outcome = resume_canary(config)
+        print(format_resume(outcome))
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            canary_report = build_canary_report(conn, config)
+        finally:
+            conn.close()
+        path = write_canary_report(config, canary_report, render_canary_html(canary_report))
+        print(f"보고서: {path}")
+        return outcome.exit_code
 
     if args.live_canary or args.canary_rehearsal:
         from .canary.runner import format_result as format_canary

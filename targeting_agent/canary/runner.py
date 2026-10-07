@@ -38,6 +38,7 @@ from ..core.models import ActionType
 from .executor import CanaryViolation, LikeOnlyExecutor, build_like_only_executor
 from .state import (
     ARMED,
+    EXPIRED_NO_ELIGIBLE,
     COMPLETED,
     FAILED,
     RUNNING,
@@ -50,6 +51,7 @@ from .state import (
     CanaryState,
     arm,
     load_state,
+    start_live_window,
     save_state,
     state_path,
 )
@@ -83,7 +85,8 @@ _STOP_STATUS: tuple[tuple[str, str], ...] = (
 # 채워진다. 그래서 이 조건은 "우리가 존재를 확인한 게시물만 누른다"는 뜻이다.
 # CSV로 들여온 샘플처럼 한 번도 열어 본 적 없는 주소에는 실제 동작을 하지 않는다.
 _ELIGIBLE_SQL = """
-SELECT q.action_id, q.media_pk, q.creator_id, q.target_score, c.username
+SELECT q.action_id, q.media_pk, q.creator_id, q.target_score, c.username,
+       m.media_id, m.canonical_url
 FROM action_queue q
 LEFT JOIN creators c ON c.creator_id = q.creator_id
 LEFT JOIN candidate_media m ON m.media_pk = q.media_pk
@@ -165,8 +168,22 @@ def _eligible_actions(
     """임계값을 넘고 아직 실제로 누르지 않은 LIKE Action만 고른다.
 
     임계값은 운영 설정 그대로다 — Canary를 채우려고 낮추지 않는다.
+    SQL로 거른 뒤, **주소가 실제 Instagram 게시물인지** 한 번 더 본다.
+    모양만 맞는 합성 데이터(SAMPLE001 등)에 실제 동작을 하면 존재하지 않는
+    페이지를 훑는 꼴이 된다.
     """
-    return list(conn.execute(_ELIGIBLE_SQL, (float(like_threshold), int(limit))).fetchall())
+    from .resume import is_real_instagram_target
+
+    rows = conn.execute(_ELIGIBLE_SQL, (float(like_threshold), int(limit) * 4)).fetchall()
+    real = [
+        row
+        for row in rows
+        if is_real_instagram_target(str(row["canonical_url"] or ""), str(row["media_id"] or ""))
+    ]
+    dropped = len(rows) - len(real)
+    if dropped:
+        logger.info("실제 Instagram 주소가 아닌 후보 %d건을 제외했습니다.", dropped)
+    return real[: int(limit)]
 
 
 def _count_live_likes(conn: sqlite3.Connection) -> int:
@@ -265,6 +282,9 @@ def run_canary(
         conn.commit()
 
         # --- 실행 ------------------------------------------------------------
+        if live:
+            # 48시간 창은 **처음 실제로 누르려는 순간** 열린다(18E.1 §21).
+            start_live_window(current, now=moment)
         current.status = RUNNING
         if owns_state:
             save_state(path, current)

@@ -284,19 +284,59 @@ def test_8시간이_지나지_않으면_실행하지_않는다():
 
 
 def test_48시간이_지나면_만료다():
-    state = CanaryState(ends_at=(NOW - timedelta(minutes=1)).isoformat())
+    state = CanaryState(
+        live_started_at=(NOW - timedelta(hours=48)).isoformat(),
+        ends_at=(NOW - timedelta(minutes=1)).isoformat(),
+    )
 
     assert state.is_expired(now=NOW) is True
     assert state.is_expired(now=NOW - timedelta(hours=1)) is False
 
 
-def test_arm은_48시간_창을_연다():
+def test_한_번도_눌러보지_못한_canary는_만료되지_않는다():
+    """기다린 시간은 쓰기 기간이 아니다.
+
+    후보가 없어 기다리는 동안 창이 흘러가면, 정작 누를 수 있게 됐을 때
+    이미 만료돼 한 번도 못 눌러 보고 끝난다.
+    """
+    state = CanaryState(
+        started_at=(NOW - timedelta(days=30)).isoformat(),
+        ends_at=(NOW - timedelta(days=28)).isoformat(),
+    )
+
+    assert state.live_window_open is False
+    assert state.is_expired(now=NOW) is False
+
+
+def test_arm은_canary를_만들지만_창은_열지_않는다():
     state = arm(CanaryState(), now=NOW)
 
     assert state.status == ARMED
     assert state.canary_id.startswith("canary-")
-    ends = datetime.fromisoformat(state.ends_at)
-    assert (ends - NOW) == timedelta(hours=48)
+    assert state.live_started_at == ""  # 아직 쓰기 창이 아니다
+    assert state.ends_at == ""
+
+
+def test_창은_처음_실제로_누르려는_때_열린다():
+    from targeting_agent.canary.state import start_live_window
+
+    state = arm(CanaryState(), now=NOW)
+    start_live_window(state, now=NOW)
+
+    assert state.live_started_at
+    assert (datetime.fromisoformat(state.ends_at) - NOW) == timedelta(hours=48)
+
+
+def test_창은_한_번만_열린다():
+    from targeting_agent.canary.state import start_live_window
+
+    state = arm(CanaryState(), now=NOW)
+    start_live_window(state, now=NOW)
+    first = state.ends_at
+
+    start_live_window(state, now=NOW + timedelta(hours=10))
+
+    assert state.ends_at == first
 
 
 # ===========================================================================
@@ -512,8 +552,11 @@ def test_8시간_전이면_실행하지_않는다(conn: sqlite3.Connection, cana
 
 
 def test_48시간이_지나면_완료로_닫는다(conn: sqlite3.Connection, canary_config: Config):
+    from targeting_agent.canary.state import start_live_window
+
     _seed(conn)
     state = arm(CanaryState(), now=NOW - timedelta(hours=49))
+    start_live_window(state, now=NOW - timedelta(hours=49))  # 그때 실제로 눌렀다
     inner = FakeInner()
 
     result = run_canary(
@@ -677,4 +720,5 @@ def test_실제_run은_48시간_창을_시작한다(
 
     saved = load_state(state_path(tmp_path))
     assert saved.started_at
+    assert saved.live_started_at  # 실제 Run이 창을 열었다
     assert saved.ends_at
