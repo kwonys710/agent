@@ -31,6 +31,7 @@ from ..core.exceptions import BrowserSessionError, DiscoveryError, SelectorMisma
 from ..core.logger import get_logger
 from ..core.models import RawCandidate
 from .base import DiscoverySource, extract_hashtags
+from .browser_diagnostics import log_diagnostics
 from .browser_models import (
     SOURCE_BROWSER_SEARCH,
     DiscoveryStats,
@@ -43,7 +44,6 @@ from .browser_selectors import (
     BASE_URL,
     CAPTION_SELECTORS,
     CHALLENGE_TEXTS,
-    HOME_URL,
     LOGGED_IN_MARKERS,
     LOGIN_REQUIRED_MARKERS,
     LOGIN_TEXTS,
@@ -98,6 +98,9 @@ class PlaywrightBrowser:
     headless: bool = False
     timeout_ms: int = 20000
     selector_timeout_ms: int = 4000
+    executable_path: Optional[str] = None  # 브라우저 바이너리를 고정해야 하는 환경용(선택)
+    diagnostics: bool = True
+    base_url: str = BASE_URL  # 로컬 DOM fixture 검증용으로만 바꾼다(운영에서는 그대로)
     debug_dir: Optional[Path] = None
     max_screenshots: int = 10
     scroll_rounds: int = 3
@@ -118,10 +121,13 @@ class PlaywrightBrowser:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = sync_playwright().start()
         # persistent context = 운영자가 직접 로그인한 세션을 그대로 재사용한다.
-        self._context = self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(self.profile_dir),
-            headless=self.headless,
-        )
+        launch_options: dict[str, Any] = {
+            "user_data_dir": str(self.profile_dir),
+            "headless": self.headless,
+        }
+        if self.executable_path:
+            launch_options["executable_path"] = self.executable_path
+        self._context = self._playwright.chromium.launch_persistent_context(**launch_options)
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         self._page.set_default_timeout(self.timeout_ms)
 
@@ -155,6 +161,7 @@ class PlaywrightBrowser:
         logger.warning(
             "selector 미일치 stage=%s keys=%s", stage.value, ",".join(keys_of(tuple(entries)))
         )
+        self.diagnose(stage.name)
         self.capture_debug(f"selector_{stage.short}")
         raise SelectorMismatch(stage.value, keys_of(tuple(entries)), last_error)
 
@@ -205,7 +212,7 @@ class PlaywrightBrowser:
             for href in values or []:
                 if not href:
                     continue
-                url = href if href.startswith("http") else BASE_URL + href
+                url = href if href.startswith("http") else self.base_url + href
                 if url not in found:
                     found.append(url)
         return found
@@ -213,8 +220,8 @@ class PlaywrightBrowser:
     # --- 읽기 ------------------------------------------------------------
     def session_state(self) -> SessionState:
         page = self._require_page()
-        if not page.url.startswith(BASE_URL):
-            self.goto(HOME_URL)
+        if not page.url.startswith(self.base_url):
+            self.goto(self._home_url())
         body = (page.inner_text("body") or "").lower()
 
         if any(marker in body for marker in CHALLENGE_TEXTS):
@@ -234,7 +241,7 @@ class PlaywrightBrowser:
     def search(self, query: str) -> None:
         """공개 Web UI를 클릭·입력으로 따라간다(비공개 endpoint를 추측하지 않는다)."""
         page = self._require_page()
-        self.goto(HOME_URL)
+        self.goto(self._home_url())
 
         key, entry = self._locate(SelectorStage.SEARCH_ENTRY, SEARCH_ENTRY)
         logger.debug("검색 진입 selector=%s", key)
@@ -290,6 +297,12 @@ class PlaywrightBrowser:
             media_type="REEL" if "/reel/" in url else "POST",
         )
 
+    def diagnose(self, stage: str) -> Optional[dict[str, Any]]:
+        """실패한 단계의 화면 구조만 JSON 한 줄로 남긴다(HTML/쿠키 수집 없음)."""
+        if not self.diagnostics or self._page is None:
+            return None
+        return log_diagnostics(self._page, stage)
+
     def capture_debug(self, name: str) -> Optional[str]:
         """selector 실패 등 예외 상황에서만 화면을 저장한다(전체 HTML dump 금지)."""
         if self.debug_dir is None or self._screenshots >= self.max_screenshots:
@@ -312,6 +325,9 @@ class PlaywrightBrowser:
             except Exception:  # noqa: BLE001 - 종료 실패는 무시
                 pass
         self._context = self._page = self._playwright = None
+
+    def _home_url(self) -> str:
+        return self.base_url.rstrip("/") + "/"
 
     def _require_page(self) -> Any:
         if self._page is None:
@@ -452,6 +468,7 @@ class InstagramBrowserDiscovery(DiscoverySource):
 
         detail = self.browser.open_post(normalized.canonical_url)
         if detail is None:
+            self.stats.detail_failed += 1
             # 상세를 읽지 못한 건은 후보로 만들지 않는다(검색어 전체를 실패시키지도 않는다).
             message = (
                 f"stage={SelectorStage.POST_DETAIL.value} "
@@ -474,4 +491,7 @@ class InstagramBrowserDiscovery(DiscoverySource):
         candidate.like_count = detail.like_count
         candidate.comment_count = detail.comment_count
         candidate.extra["source_query"] = query
+        self.stats.note_extraction(
+            username=bool(detail.username), caption=bool(detail.caption.strip())
+        )
         return candidate

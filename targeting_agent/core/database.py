@@ -50,17 +50,22 @@ def get_connection(db_path: Union[Path, str]) -> sqlite3.Connection:
     return conn
 
 
-NEW_COLUMNS_V2 = (
+ADDED_COLUMNS = (
     ("candidate_media", "canonical_url", "TEXT"),
     ("candidate_media", "instagram_media_id", "TEXT"),
     ("action_queue", "approved_at", "TEXT"),  # v4(Phase 14)
     ("import_events", "note", "TEXT"),        # v5(Phase 12B)
+    # v9(Phase 18A.3): 추출 품질 — 기존 행에는 NULL로 남는다(0이 아니다).
+    ("browser_discovery_runs", "username_found", "INTEGER"),
+    ("browser_discovery_runs", "caption_found", "INTEGER"),
+    ("browser_discovery_runs", "detail_failed", "INTEGER"),
 )
+NEW_COLUMNS_V2 = ADDED_COLUMNS  # 이전 이름 호환
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
-    """기존 DB를 지우지 않고 필요한 컬럼만 덧붙인다(Phase 12A: schema v2)."""
-    for table, column, column_type in NEW_COLUMNS_V2:
+    """기존 DB를 지우지 않고 필요한 컬럼만 덧붙인다(ALTER ADD COLUMN만 사용)."""
+    for table, column, column_type in ADDED_COLUMNS:
         existing = {
             row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         }

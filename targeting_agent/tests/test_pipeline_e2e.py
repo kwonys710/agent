@@ -5,7 +5,10 @@ CSV Import → 분석 → Score → 댓글 3개 → Action Queue → Dry Run →
 """
 from __future__ import annotations
 
+import csv
+import io
 import sqlite3
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -17,6 +20,28 @@ from targeting_agent.pipeline import TargetingPipeline, format_summary, next_run
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_CSV = PACKAGE_ROOT / "samples" / "candidates_sample.csv"
+
+
+def _recent_sample_csv(tmp_path: Path) -> Path:
+    """샘플 CSV의 posted_at을 "오늘 기준 최근"으로 옮긴 복사본을 만든다.
+
+    Target Score에는 최신성 가중치가 있어서, 날짜가 고정된 샘플을 쓰면
+    실행 날짜가 지날수록 점수가 내려가 테스트가 시간에 따라 깨진다.
+    상대 간격은 그대로 두고 가장 최근 글만 '어제'가 되도록 평행 이동한다.
+    원본 샘플 파일은 건드리지 않는다.
+    """
+    rows = list(csv.DictReader(io.StringIO(SAMPLE_CSV.read_text(encoding="utf-8-sig"))))
+    dates = [datetime.strptime(row["posted_at"], "%Y-%m-%d").date() for row in rows]
+    shift = (date.today() - timedelta(days=1)) - max(dates)
+    for row, posted in zip(rows, dates):
+        row["posted_at"] = (posted + shift).isoformat()
+
+    path = tmp_path / "candidates_recent.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
 
 
 def _tmp_config(tmp_path: Path, **overrides) -> Path:
@@ -32,7 +57,10 @@ def _tmp_config(tmp_path: Path, **overrides) -> Path:
     raw["profile"] = {"path": str(PACKAGE_ROOT / "profiles" / "dailyreels.yaml")}
     # 단위/E2E 테스트는 실제 Claude CLI를 호출하지 않는다(Phase 13 원칙).
     raw["ai"] = {**raw.get("ai", {}), "provider": "heuristic"}
-    raw["discovery"] = {**raw["discovery"], "import": {"path": str(SAMPLE_CSV)}}
+    raw["discovery"] = {
+        **raw["discovery"],
+        "import": {"path": str(_recent_sample_csv(tmp_path))},
+    }
     for key, value in overrides.items():
         raw[key] = value
     path = tmp_path / "config.yaml"
@@ -142,7 +170,16 @@ def test_rerun_is_idempotent(tmp_path) -> None:
 
 def test_main_cli_dry_run(tmp_path, capsys) -> None:
     config_path = _tmp_config(tmp_path)
-    exit_code = main(["--config", str(config_path), "--import", str(SAMPLE_CSV), "--seed", "5"])
+    exit_code = main(
+        [
+            "--config",
+            str(config_path),
+            "--import",
+            str(_recent_sample_csv(tmp_path)),
+            "--seed",
+            "5",
+        ]
+    )
     captured = capsys.readouterr().out
 
     assert exit_code == 0

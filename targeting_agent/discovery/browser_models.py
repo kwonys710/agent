@@ -98,12 +98,28 @@ class DiscoveryStats:
     collected: int = 0
     selector_errors: int = 0
     stop_reason: Optional[str] = None
+    # 추출 품질(Phase 18A.3). caption은 "공개 화면에 caption이 있는 후보" 기준으로만 센다.
+    username_found: int = 0
+    caption_found: int = 0
+    detail_failed: int = 0
 
     def add_query(self, result: QueryResult) -> None:
         self.queries.append(result)
         self.found += result.found
         self.collected += result.collected
         self.selector_errors += len(result.errors)
+
+    def note_extraction(self, *, username: bool, caption: bool) -> None:
+        self.username_found += 1 if username else 0
+        self.caption_found += 1 if caption else 0
+
+    @property
+    def username_rate(self) -> float:
+        return self.username_found / self.collected if self.collected else 0.0
+
+    @property
+    def caption_rate(self) -> float:
+        return self.caption_found / self.collected if self.collected else 0.0
 
     @property
     def ok_queries(self) -> int:

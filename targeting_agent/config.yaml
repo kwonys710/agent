@@ -201,6 +201,7 @@ browser_discovery:
   selector_timeout_ms: 4000  # selector 하나를 확인하는 대기(안 맞는 selector에 오래 매달리지 않는다)
   scroll_rounds: 3
   media_types: ["REEL"]
+  executable_path: ""        # 비우면 Playwright 기본 Chromium을 쓴다(고정이 필요한 환경에서만 지정)
   queries: []              # 비우면 discovery.hashtags 를 검색어로 재사용한다
   limits:
     # 플랫폼 제한 우회가 아니라, 운영자가 스스로 거는 보수적 내부 상한이다.
@@ -222,6 +223,7 @@ browser_discovery:
     enabled: true
     dir: "data/browser_debug"
     max_screenshots: 10
+    diagnostics: true        # selector 실패 시 화면 구조만 JSON 1줄로 기록(HTML/쿠키 수집 없음)
 
 scheduler:
   # Windows Task Scheduler가 하루 1회 실행하는 배치 모드(python -m targeting_agent.main --scheduled).

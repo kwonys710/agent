@@ -62,10 +62,24 @@ class BrowserDiscoveryResult:
     selector_errors: int = 0   # 화면 구조(selector) 오류
     ok_queries: int = 0
     failed_queries: int = 0
+    # 추출 품질(Phase 18A.3)
+    username_found: int = 0
+    caption_found: int = 0
+    detail_failed: int = 0
     stop_reason: Optional[str] = None
     message: str = ""
     added_media_pks: list[int] = field(default_factory=list)
     details: list[str] = field(default_factory=list)
+
+    @property
+    def username_rate(self) -> float:
+        return self.username_found / self.collected if self.collected else 0.0
+
+    @property
+    def caption_rate(self) -> float:
+        """caption 추출률. caption이 아예 없는 게시물까지 실패로 세지 않기 위해
+        분모는 '수집한 후보'이며, 결과 해석은 Summary의 안내 문구와 함께 본다."""
+        return self.caption_found / self.collected if self.collected else 0.0
 
     @property
     def errors(self) -> int:
@@ -95,6 +109,8 @@ def _default_browser(config: Config) -> Any:
         headless=bool(config.get("browser_discovery.headless", False)),
         timeout_ms=int(config.get("browser_discovery.timeout_ms", 20000)),
         selector_timeout_ms=int(config.get("browser_discovery.selector_timeout_ms", 4000)),
+        executable_path=str(config.get("browser_discovery.executable_path", "") or "") or None,
+        diagnostics=bool(config.get("browser_discovery.debug.diagnostics", True)),
         debug_dir=(
             config._resolve_path(config.get("browser_discovery.debug.dir", "data/browser_debug"))
             if bool(config.get("browser_discovery.debug.enabled", True))
@@ -264,6 +280,9 @@ def _discover(
     result.selector_errors = stats.selector_errors
     result.ok_queries = stats.ok_queries
     result.failed_queries = stats.failed_queries
+    result.username_found = stats.username_found
+    result.caption_found = stats.caption_found
+    result.detail_failed = stats.detail_failed
     result.status = _status_of(stats.ok_queries, stats.failed_queries)
     for query in stats.queries:
         for message in query.errors:
@@ -356,8 +375,9 @@ def _record_run(conn: sqlite3.Connection, result: BrowserDiscoveryResult) -> Non
     conn.execute(
         "INSERT INTO browser_discovery_runs (started_at, finished_at, status, session_state, "
         "queries, found, collected, added, duplicate, invalid, analyzed, needs_enrichment, "
-        "claude_calls, cache_hits, errors, stop_reason) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "claude_calls, cache_hits, errors, stop_reason, username_found, caption_found, "
+        "detail_failed) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             result.started_at,
             result.finished_at,
@@ -375,6 +395,9 @@ def _record_run(conn: sqlite3.Connection, result: BrowserDiscoveryResult) -> Non
             result.cache_hits,
             result.errors,
             result.stop_reason,
+            result.username_found,
+            result.caption_found,
+            result.detail_failed,
         ),
     )
     conn.commit()
@@ -392,6 +415,9 @@ def format_result(result: BrowserDiscoveryResult) -> str:
         f" 검색어      : {result.queries}개 (성공 {result.ok_queries} / 실패 {result.failed_queries})",
         f" 발견 / 수집 : {result.found} / {result.collected}",
         f" 신규 / 중복 : {result.added} / {result.duplicate}",
+        f" 추출 품질   : username {result.username_found}/{result.collected}"
+        f" · caption {result.caption_found}/{result.collected}"
+        f" (상세 실패 {result.detail_failed})",
         f" 분석 완료   : {result.analyzed} (정보 부족 {result.needs_enrichment})",
         f" Claude 호출 : {result.claude_calls} (Cache Hit {result.cache_hits})",
         f" 오류        : {result.errors}",
