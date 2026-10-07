@@ -112,6 +112,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="LIVE 준비도를 점검해 보고서를 만든다(DB·설정만 읽음, 설정 변경 없음)",
     )
     parser.add_argument(
+        "--live-canary",
+        action="store_true",
+        help="Limited Live Canary: 실제 Instagram LIKE를 소수만 수행한다(COMMENT 없음)",
+    )
+    parser.add_argument(
+        "--canary-rehearsal",
+        action="store_true",
+        help="Live Canary 전 구간을 DRY_RUN으로만 1회 점검한다(실제 쓰기 없음)",
+    )
+    parser.add_argument(
+        "--canary-status",
+        action="store_true",
+        help="Live Canary 진행 상태만 출력한다(아무 것도 실행하지 않는다)",
+    )
+    parser.add_argument(
         "--discover",
         action="store_true",
         help="Browser Discovery: Instagram 검색으로 Reel 후보 수집 → 저장 → 분석(읽기 전용)",
@@ -531,6 +546,49 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(format_readiness(readiness))
         print(f"보고서: {path}")
         return 0
+
+    if args.canary_status:
+        from .canary.report import (
+            build_canary_report,
+            format_canary_report,
+            render_canary_html,
+            write_canary_report,
+        )
+
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            canary_report = build_canary_report(conn, config)
+        finally:
+            conn.close()
+        path = write_canary_report(config, canary_report, render_canary_html(canary_report))
+        print(format_canary_report(canary_report))
+        print(f"보고서: {path}")
+        return 0
+
+    if args.live_canary or args.canary_rehearsal:
+        from .canary.runner import format_result as format_canary
+        from .canary.runner import run_canary
+
+        # --live-canary 만 실제로 쓴다. 리허설은 전 구간 DRY_RUN이다.
+        outcome = run_canary(config, live=bool(args.live_canary))
+        print(format_canary(outcome))
+        if args.live_canary:
+            from .canary.report import (
+                build_canary_report,
+                render_canary_html,
+                write_canary_report,
+            )
+
+            conn = get_connection(config.db_path)
+            try:
+                init_db(conn)
+                canary_report = build_canary_report(conn, config)
+            finally:
+                conn.close()
+            path = write_canary_report(config, canary_report, render_canary_html(canary_report))
+            print(f"보고서: {path}")
+        return outcome.exit_code
 
     if args.scheduled:
         from .scheduler.runner import format_result, run_scheduled
