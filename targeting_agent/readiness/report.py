@@ -222,6 +222,9 @@ def build_readiness(
         "Effective": mode.as_line(),
     }
 
+    # Canary 진행 상황도 함께 보여 준다 — 준비도와 실제 진행을 한 화면에서 본다(18E.1 §59).
+    canary_rows = _canary_rows(conn, config)
+
     broken = [link for link in chain if not link.complete]
     report.sections = {
         "운영 기준선": baseline.as_sections()["후보 모집단 (전체 기간)"],
@@ -234,6 +237,7 @@ def build_readiness(
             **audit.as_rows(),
             "후보→실행 사슬": f"{len(chain)}건 검사 · 끊김 {len(broken)}건",
         },
+        "Live Canary": canary_rows,
         "설정 상태": report.config_state,
     }
 
@@ -271,6 +275,37 @@ def _unique(items: list[str]) -> list[str]:
             seen.add(item)
             result.append(item)
     return result
+
+
+def _canary_rows(conn: sqlite3.Connection, config: Config) -> dict[str, str]:
+    """Canary 진행 상황. 상태 파일이 없으면 '아직 시작 안 함'이다."""
+    from ..canary.resume import _ai_usage
+    from ..canary.state import load_state, state_path
+
+    state = load_state(state_path(config.data_dir))
+    used, limit = _ai_usage(conn, config)
+    threshold = float(config.get("actions.require_score_for_like", 75))
+    best = conn.execute(
+        "SELECT MAX(target_score) FROM candidate_media "
+        "WHERE source = 'instagram_browser_search' AND target_score IS NOT NULL"
+    ).fetchone()
+    highest = f"{float(best[0]):.2f}" if best and best[0] is not None else "-"
+    next_run = state.next_allowed_run()
+    return {
+        "상태": state.status,
+        "대기 사유": state.last_waiting_reason or state.stop_reason or "-",
+        "확인된 실제 LIKE": f"{state.total_live_likes} / {state.max_total}",
+        "오늘": f"{state.today_live_likes} / {state.max_per_day}",
+        "Claude 한도": f"{used} / {limit} (남음 {max(0, limit - used)})",
+        "LIKE 임계값 / 실제 최고점": f"{threshold:.0f} / {highest}",
+        "LIVE 창": (
+            f"{state.live_started_at} ~ {state.ends_at}"
+            if state.live_started_at
+            else "아직 열리지 않음(첫 실제 시도 때 48시간 시작)"
+        ),
+        "다음 허용 Run": next_run.isoformat(timespec="seconds") if next_run else "즉시",
+        "사람 검토 대기": f"{len(state.review_backlog)}건",
+    }
 
 
 def render_readiness_html(report: ReadinessReport) -> str:

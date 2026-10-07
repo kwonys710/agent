@@ -268,9 +268,30 @@ Phase 18E 구현 완료 / 실제 LIKE 미수행: Limited Live Canary (LIKE 전�
   75를 넘는 6건은 전부 CSV 샘플(canonical_url 없음) → 대상 아님
   오늘 Claude 20/20 소진으로 추가 분석 불가
   임계값을 낮추지 않고 NO_ELIGIBLE_CANDIDATES로 정상 종료했다.
-  Scheduler는 설치하지 않았다(첫 실제 Run 성공 전에는 설치하지 않는다).
+  (18E.1에서 Resume Scheduler를 설치했다 — 깨우기만 하고 쓰기는 게이트가 정한다.)
 
-Next: 자격 후보 확보(아래) → 첫 실제 Canary → Scheduler
+Phase 18E.1 완료: Canary 자동 이어가기
+- '기다리는 것'을 실패와 구분했다 — WAITING_AI_BUDGET / WAITING_ELIGIBLE
+- **48시간 창을 '처음 실제로 누르려는 때'부터 센다.** 이전에는 Canary를 만든
+  순간부터 세서, 후보가 없어 기다리는 동안 창이 흘러가 한 번도 못 눌러 보고
+  만료될 수 있었다. 기다린 시간은 쓰기 기간이 아니다
+- 합성 주소 차단을 자격 판정 안으로(_eligible_actions 한 곳에서만 판단).
+  SAMPLE001 처럼 열어 본 적 없는 주소는 점수와 무관하게 대상이 아니다
+- Claude 한도는 기존 집계(DAILY_METRIC + today_str)를 그대로 읽는다.
+  reset 시각을 추측하지 않고, 남은 예산만큼만 Discovery 분석에 쓴다
+- 상태 파일이 없는데 실제 LIKE 기록이 있으면 새 Canary를 열지 않고 멈춘다
+- 동시 실행은 기존 SchedulerLock 재사용으로 막는다
+- Windows Task 설치: DailyReels_Targeting_CanaryResume (8시간 간격, IgnoreNew)
+  Task는 깨우기만 한다 — 실제로 누를지는 Runner의 상태·한도·게이트가 정한다
+- 테스트 29건 추가, 전체 694 통과
+
+현재 Canary 상태: WAITING_AI_BUDGET
+  Claude 20/20 소진 · 자격 후보 0 · 실제 후보 최고점 71.50 (임계값 75)
+  LIVE 창 미개시 · 실제 Instagram 쓰기 0
+  한도가 회복되면 Scheduler가 Discovery → 분석 → 자격 확인 → 리허설 →
+  제한된 실제 LIKE 까지 자동으로 이어간다(사용자 개입 불필요).
+
+Next: Scheduler 자동 진행 관찰 → 첫 실제 LIKE → 재판정
   1) Claude 일일 한도 회복 후 run_targeting_discovery.bat --discover 로
      최신 Reel 수집 + 분석(최근 게시물일수록 activity 점수가 높아 75를 넘길 수 있다)
   2) run_targeting_canary_rehearsal.bat 로 리허설(실제 쓰기 0)

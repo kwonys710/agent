@@ -27,8 +27,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# 프로젝트 루트: 이 스크립트(targeting_agent\scripts\)의 두 단계 위
-$scriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
+# 프로젝트 루트: 이 스크립트(targeting_agent\scripts\)의 두 단계 위.
+# $PSScriptRoot 가 비는 호출 방식이 있어 $MyInvocation 으로 한 번 더 받는다.
+$scriptDir = $PSScriptRoot
+if ([string]::IsNullOrEmpty($scriptDir)) {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+}
+if ([string]::IsNullOrEmpty($scriptDir)) {
+    Write-Error "스크립트 위치를 알 수 없습니다. 프로젝트 폴더에서 실행하세요."
+    exit 1
+}
 $projectRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
 $batPath     = Join-Path $projectRoot "run_targeting_canary_resume.bat"
 
