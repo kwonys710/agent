@@ -444,6 +444,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         keep_days=int(config.get("logging.keep_days", 30)),
     )
 
+    # 설정값과 실제 동작이 다를 수 있다(LIVE인데 dry_run=true). 운영자가 "LIVE로
+    # 돌고 있다"고 믿는 채로 아무 일도 안 일어나거나 그 반대가 되지 않도록,
+    # 실행 전에 **실제로 무엇이 일어나는지**를 한 줄로 남긴다(Phase 18D.5).
+    from .readiness.guards import effective_mode
+
+    logger.info("Executor %s", effective_mode(config).as_line())
+
     if args.dashboard:
         if not bool(config.get("dashboard.enabled", True)):
             print("[오류] dashboard.enabled 가 false 입니다.", file=sys.stderr)
