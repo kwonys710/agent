@@ -249,7 +249,34 @@ Phase 18D 완료: Live Readiness & Calibration
 - 18D.7/8: `--live-readiness` 로 결정론적 보고서 생성(LLM 호출 없음)
 - 테스트 618건 통과(Phase 18D에서 130건 추가)
 
-Next: 운영자 LIVE 전환 결정 / Dashboard에서 사람 Feedback 축적
+Phase 18E 구현 완료 / 실제 LIKE 미수행: Limited Live Canary (LIKE 전용)
+- 상한을 코드에 박았다: 총 6 / 하루 3 / 1회 2 / 48시간 / 최소 8시간 간격
+- config.yaml은 LIVE로 바뀌지 않는다 — 프로세스 메모리 사본에서만 전환하고,
+  안쪽은 기존 BrowserExecutor 그대로라 두 스위치 계약을 똑같이 통과한다
+- 한도는 data/live_canary_state.json 에 남는다(gitignore). Scheduler가 잘못 떠도
+  상태가 '다 썼다'면 no-op. 상태 파일이 깨지면 '처음부터'가 아니라 FAILED로 막는다
+- COMMENT 이중 차단: Queue에서 LIKE만 승인 + Executor가 호출 자체를 위반으로 중단
+  (CanaryViolation은 PlatformWarningError 상속 — Action 단위 격리가 아니라 Run 중단)
+- click 성공 ≠ 좋아요 남음. 새로고침해 유지되는지 확인하고, 확인 못 하면
+  UNKNOWN_WRITE_STATE로 남기고 다시 누르지 않는다(재클릭은 좋아요 취소다)
+- 대상 조건에 canonical_url 필수를 추가 — 실제로 열어 본 적 있는 게시물만 누른다
+- 실제 Chromium fixture로 LIVE 경로 검증(누르기/확인/새로고침/중복/COMMENT 차단)
+- 테스트 47건 추가, 전체 665 PASS
+
+**실제 LIKE는 수행하지 않았다.** 자격 후보가 0건이기 때문이다.
+  실제 후보 최고점 71.50 < LIKE 임계값 75
+  75를 넘는 6건은 전부 CSV 샘플(canonical_url 없음) → 대상 아님
+  오늘 Claude 20/20 소진으로 추가 분석 불가
+  임계값을 낮추지 않고 NO_ELIGIBLE_CANDIDATES로 정상 종료했다.
+  Scheduler는 설치하지 않았다(첫 실제 Run 성공 전에는 설치하지 않는다).
+
+Next: 자격 후보 확보(아래) → 첫 실제 Canary → Scheduler
+  1) Claude 일일 한도 회복 후 run_targeting_discovery.bat --discover 로
+     최신 Reel 수집 + 분석(최근 게시물일수록 activity 점수가 높아 75를 넘길 수 있다)
+  2) run_targeting_canary_rehearsal.bat 로 리허설(실제 쓰기 0)
+  3) run_targeting_live_canary.bat 로 첫 실제 Canary(최대 2건)
+  4) 성공 확인 후에만 Scheduler 설치
+Dashboard에서 사람 Feedback 축적(Target 보정 신뢰도 LOW → 상향)
 Meta API: Optional (진행을 막지 않음)
 
 Pending:
