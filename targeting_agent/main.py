@@ -107,6 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Autopilot: Discovery → 분석 → Action 결정 → 실행(기본 DRY_RUN)까지 한 번에",
     )
     parser.add_argument(
+        "--live-readiness",
+        action="store_true",
+        help="LIVE 준비도를 점검해 보고서를 만든다(DB·설정만 읽음, 설정 변경 없음)",
+    )
+    parser.add_argument(
         "--discover",
         action="store_true",
         help="Browser Discovery: Instagram 검색으로 Reel 후보 수집 → 저장 → 분석(읽기 전용)",
@@ -507,6 +512,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         print(format_result(result))
         return result.exit_code
+
+    if args.live_readiness:
+        from .readiness.report import (
+            build_readiness,
+            format_readiness,
+            render_readiness_html,
+            write_readiness_report,
+        )
+
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            readiness = build_readiness(conn, config)
+        finally:
+            conn.close()
+        path = write_readiness_report(config, readiness, render_readiness_html(readiness))
+        print(format_readiness(readiness))
+        print(f"보고서: {path}")
+        return 0
 
     if args.scheduled:
         from .scheduler.runner import format_result, run_scheduled

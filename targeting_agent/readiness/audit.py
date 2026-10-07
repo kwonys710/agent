@@ -105,6 +105,11 @@ class AuditReport:
 
     traces: list[AuditTrace] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
+    # interactions 테이블에서 직접 센 실제 쓰기. Action에 연결되지 않은 기록이
+    # 있어도 놓치지 않기 위해 Action을 따라가지 않고 따로 센다.
+    recorded_real_writes: int = 0
+    # 어느 Action에도 연결되지 않은 실행 기록. 있으면 "누가 시켰는지" 알 수 없다.
+    orphan_interactions: int = 0
 
     @property
     def total(self) -> int:
@@ -116,7 +121,13 @@ class AuditReport:
 
     @property
     def real_writes(self) -> int:
-        return sum(1 for trace in self.traces if trace.real_write)
+        """실제 Instagram 쓰기 수.
+
+        Action을 따라가며 센 수와 interactions에서 직접 센 수 중 **큰 쪽**을 쓴다.
+        Action에 연결되지 않은 기록이 있어도 '쓰기 0건'으로 보고하면 안 된다.
+        """
+        traced = sum(1 for trace in self.traces if trace.real_write)
+        return max(traced, self.recorded_real_writes)
 
     @property
     def unattributed_approvals(self) -> int:
@@ -148,6 +159,7 @@ class AuditReport:
             "실제 Instagram 쓰기": str(self.real_writes),
             "Planned≠Actual Executor": f"{self.executor_mismatches} (정상일 수 있음 — 표기만 분리)",
             "승인 주체 미기록": str(self.unattributed_approvals),
+            "Action에 연결 안 된 실행 기록": str(self.orphan_interactions),
             "감사 공백": "없음" if self.consistent else f"{len(self.issues)}건",
         }
 
@@ -177,6 +189,25 @@ def collect_audit(conn: sqlite3.Connection) -> AuditReport:
             error=str(row["error"] or ""),
         )
         report.traces.append(trace)
+
+    # Action을 따라가지 않고 interactions를 직접 본다 — 연결이 끊긴 기록도 세기 위함.
+    report.recorded_real_writes = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM interactions WHERE dry_run = 0 AND success = 1"
+        ).fetchone()[0]
+    )
+    report.orphan_interactions = int(
+        conn.execute(
+            """SELECT COUNT(*) FROM interactions i
+               WHERE i.action_id IS NULL
+                  OR NOT EXISTS (SELECT 1 FROM action_queue q WHERE q.action_id = i.action_id)"""
+        ).fetchone()[0]
+    )
+    if report.orphan_interactions:
+        report.issues.append(
+            f"실행 기록 {report.orphan_interactions}건이 어느 Action에도 연결돼 있지 않습니다 "
+            "— 누가 시켰는지 되짚을 수 없습니다."
+        )
 
     _check_issues(report)
     return report

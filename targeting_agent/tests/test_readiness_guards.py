@@ -254,3 +254,43 @@ def test_dry_run_기록만_있으면_통과한다(conn: sqlite3.Connection, conf
 
     check = next(c for c in report.checks if c.name == "실제 Instagram 쓰기 기록")
     assert check.status == PASS and "0건" in check.detail
+
+
+# ===========================================================================
+# 단계적 전환 — LIKE만 켜는 운영이 기존 설정으로 가능한가 (§47 · §48)
+# ===========================================================================
+def test_comment를_끄면_like만_나간다(config: Config):
+    """Stage 1(LIKE-only)은 새 구조 없이 기존 config로 가능해야 한다."""
+    from targeting_agent.actions.policy import ActionPolicy
+
+    target = _config(config, actions={**config.raw["actions"], "enable_comment": False})
+    policy = ActionPolicy.from_config(target)
+
+    recommended = policy.recommend(95.0)  # COMMENT 임계값을 한참 넘는 점수
+
+    assert ActionType.LIKE in recommended
+    assert ActionType.COMMENT not in recommended
+
+
+def test_like를_끄면_like가_나가지_않는다(config: Config):
+    from targeting_agent.actions.policy import ActionPolicy
+
+    target = _config(config, actions={**config.raw["actions"], "enable_like": False})
+    policy = ActionPolicy.from_config(target)
+
+    assert ActionType.LIKE not in policy.recommend(95.0)
+
+
+def test_comment는_임계값과_품질게이트를_모두_지나야_한다(config: Config):
+    """COMMENT는 점수만으로 나가지 않는다 — 내용이 품질 게이트를 지나야 한다."""
+    from targeting_agent.actions.policy import ActionPolicy
+    from targeting_agent.comments.quality_filter import CommentQualityFilter
+
+    policy = ActionPolicy.from_config(config)
+    quality = CommentQualityFilter(config)
+
+    assert ActionType.COMMENT in policy.recommend(95.0)
+    # 점수가 높아도 일반적인 문장은 게이트에서 막힌다.
+    assert quality.check("좋은 영상 잘 봤습니다", ["퇴근"]).ok is False
+    assert quality.check("", ["퇴근"]).ok is False
+    assert quality.check("퇴근길 풍경이 저랑 똑같네요", ["퇴근"]).ok is True

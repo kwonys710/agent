@@ -441,7 +441,7 @@ def _add_findings(result: ScoreCalibration) -> None:
     # 추천은 문장으로만 남긴다. 설정은 건드리지 않는다.
     if result.comment_unreachable or result.metadata_limited:
         result.recommendations.append(
-            "임계값을 내리는 대신 **빠진 정보를 채우는 쪽**을 먼저 보세요 — "
+            "임계값을 내리는 대신 빠진 정보를 채우는 쪽을 먼저 보세요 — "
             "작성자 followers와 게시 시각을 알면 상한 자체가 사라집니다."
         )
     if result.confidence != CONFIDENCE_HIGH:

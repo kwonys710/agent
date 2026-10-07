@@ -115,10 +115,13 @@ class ProjectionReport:
     daily_comment_limit: int = 0
     ground_truth_available: bool = False
     notes: list[str] = field(default_factory=list)
+    # 숫자를 오해하지 않도록 붙이는 설명. 위험 요소가 아니다 — 섞으면 둘 다 흐려진다.
+    caveats: list[str] = field(default_factory=list)
 
     def as_rows(self) -> dict[str, str]:
         rows = {
             "하루 한도": f"LIKE {self.daily_like_limit} · COMMENT {self.daily_comment_limit}",
+            "읽는 법": " / ".join(self.caveats) or "-",
         }
         if self.current:
             for key, value in self.current.as_row().items():
@@ -310,8 +313,8 @@ def collect_projection(
                 f"Browser Discovery로 모은 후보 {browser_total}건 중 Action 자격을 얻은 건이 "
                 "0건입니다 — 지금 수집 경로는 Action으로 이어지지 않습니다(18D.2의 점수 상한)."
             )
-    report.notes.append(
-        "'하루 예상'은 **지금 쌓여 있는 후보**를 하루 한도 안에서 처리했을 때의 수다 — "
+    report.caveats.append(
+        "'하루 예상'은 지금 쌓여 있는 후보를 하루 한도 안에서 처리했을 때의 수다 — "
         "매일 그만큼 나온다는 뜻이 아니다."
     )
     return report

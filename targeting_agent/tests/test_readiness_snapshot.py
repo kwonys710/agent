@@ -345,3 +345,26 @@ def test_승인_주체_미기록은_UNKNOWN으로_표시된다(conn: sqlite3.Con
 
     assert report.traces[0].approved_by == UNKNOWN
     assert report.unattributed_approvals == 0  # PENDING은 아직 승인 단계가 아니다
+
+
+def test_action에_연결되지_않은_실행기록은_감사공백이다(conn: sqlite3.Connection):
+    """누가 시킨 건지 되짚을 수 없는 실행 기록은 그냥 넘기지 않는다.
+
+    Action을 따라가며 세면 이런 기록은 '없는 것'처럼 보인다 — 실제 쓰기가
+    있었는데도 0건으로 보고하게 된다.
+    """
+    creator_id = _creator(conn, "a")
+    media_pk = _media(conn, "AAA111", creator_id=creator_id)
+    conn.execute(
+        """INSERT INTO interactions
+           (media_pk, creator_id, action_id, action_type, executor, dry_run, success, executed_at)
+           VALUES (?, ?, NULL, 'LIKE', 'browser', 0, 1, '2026-10-01T00:00:00+00:00')""",
+        (media_pk, creator_id),
+    )
+
+    report = collect_audit(conn)
+
+    assert report.orphan_interactions == 1
+    assert report.real_writes == 1  # Action이 없어도 쓰기는 쓰기다
+    assert not report.consistent
+    assert any("연결돼 있지 않습니다" in issue for issue in report.issues)
