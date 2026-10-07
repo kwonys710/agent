@@ -580,6 +580,23 @@ def record_interaction(
     return int(cursor.lastrowid) if cursor.rowcount else None
 
 
+def approve_action(
+    conn: sqlite3.Connection, action_id: int, *, at: Optional[str] = None
+) -> bool:
+    """Action에 승인 시각을 찍는다(Approval Gate의 유일한 통과 지점).
+
+    실행 조건은 `status='PENDING' AND approved_at IS NOT NULL`이므로, 승인은
+    상태를 바꾸지 않고 approved_at만 채운다. 이미 승인된 Action은 그대로 둔다.
+    """
+    now = at or utc_now()
+    cursor = conn.execute(
+        "UPDATE action_queue SET approved_at = ?, updated_at = ? "
+        "WHERE action_id = ? AND approved_at IS NULL",
+        (now, now, int(action_id)),
+    )
+    return cursor.rowcount > 0
+
+
 def has_interaction(
     conn: sqlite3.Connection,
     media_pk: int,

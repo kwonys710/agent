@@ -149,11 +149,21 @@ def test_manual_executor_writes_export(tmp_path) -> None:
     assert "LIKE" in content and "퇴근 분위기 좋네요" in content
 
 
-def test_stub_executors_do_not_act() -> None:
-    browser = BrowserExecutor(dry_run=True)
-    assert browser.validate_session() is False
-    assert browser.execute_like(_action()).status is ActionStatus.SKIPPED
+def test_browser_executor_defaults_to_dry_run() -> None:
+    """Phase 18B: BrowserExecutor는 기본 DRY_RUN — 브라우저를 열지 않고 계획만 만든다."""
+    browser = BrowserExecutor(dry_run=True)  # config 없음 → DRY_RUN
+    assert browser.mode.value == "DRY_RUN"
+    assert browser.live is False
+    assert browser.validate_session() is True
 
+    result = browser.execute_like(_action())
+    assert result.status is ActionStatus.SUCCESS
+    assert result.detail.startswith("dry_run:LIKE")
+    assert result.dry_run is True
+    browser.finalize()
+
+
+def test_stub_executors_do_not_act() -> None:
     official = OfficialAPIExecutor(dry_run=True)
     assert official.execute_comment(_action(ActionType.COMMENT, "x")).status is ActionStatus.SKIPPED
     assert official.health_check()["supports_like"] is False

@@ -332,6 +332,8 @@ class TargetingPipeline:
             self.config.executor_mode,
             export_dir=self.config.export_dir,
             run_id=self.run_id,
+            config=self.config,
+            conn=self.conn,
             dry_run=self.config.dry_run,
         )
         rate_limiter = RateLimiter(self.config, self.conn, dry_run=self.config.dry_run)

@@ -188,6 +188,16 @@ learning:
     minimum_band_samples: 5     # Score 구간 추천에 필요한 최소 표본
   min_keyword_score: 2.0        # 키워드 신호 강도 임계값
 
+browser_executor:
+  # Phase 18B — 운영자가 로그인한 브라우저로 LIKE / COMMENT만 수행한다.
+  # FOLLOW / DM / 저장 / 공유는 구현하지 않는다.
+  # DISABLED: 아무 것도 하지 않음 / DRY_RUN: 실제 동작 없이 계획만 검증(기본) / LIVE: 실제 수행
+  # actions.execution.dry_run=true 이면 LIVE여도 실제 동작을 하지 않는다(강한 가드).
+  mode: "DRY_RUN"
+  headless: false            # 실제 수행 화면을 사람이 볼 수 있어야 한다
+  timeout_ms: 20000
+  selector_timeout_ms: 4000
+
 browser_discovery:
   # Phase 18A — Instagram 웹 화면에서 Reel 후보를 찾는다(읽기 전용).
   # 브라우저는 페이지 열기 / 검색 / 스크롤 / 게시물 열기 / 공개 텍스트 읽기만 한다.

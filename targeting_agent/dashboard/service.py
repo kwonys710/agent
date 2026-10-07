@@ -14,7 +14,13 @@ from typing import Any, Optional, Sequence
 
 from ..analysis.similarity import normalize_text
 from ..core.config import Config
-from ..core.database import enqueue_action, transaction, update_candidate_status, utc_now
+from ..core.database import (
+    approve_action,
+    enqueue_action,
+    transaction,
+    update_candidate_status,
+    utc_now,
+)
 from ..core.logger import get_logger
 from ..core.models import ActionStatus, ActionType, DraftStatus, FeedbackType, MediaStatus
 from ..discovery.ingest import ADDED, DUPLICATE, CandidateIngestor
@@ -311,19 +317,13 @@ class DashboardService:
                         (media_pk, action_type.value),
                     ).fetchone()
                     if existing and not existing["approved_at"]:
-                        self.conn.execute(
-                            "UPDATE action_queue SET approved_at = ?, updated_at = ? WHERE action_id = ?",
-                            (now, now, int(existing["action_id"])),
-                        )
+                        approve_action(self.conn, int(existing["action_id"]), at=now)
                         outcome.created.append(action_type.value)
                     else:
                         outcome.already.append(action_type.value)
                     continue
 
-                self.conn.execute(
-                    "UPDATE action_queue SET approved_at = ?, updated_at = ? WHERE action_id = ?",
-                    (now, now, action_id),
-                )
+                approve_action(self.conn, action_id, at=now)
                 outcome.created.append(action_type.value)
 
             if outcome.created or outcome.already:
