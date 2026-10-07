@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>릴스(상태가 남지 않는 화면)</title></head>
+<body>
+  <!-- Phase 18E: click은 되는데 **새로고침하면 사라지는** 화면.
+       이 경우 눌렸는지 알 수 없으므로 UNKNOWN_WRITE_STATE로 남기고
+       다시 누르지 않아야 한다(다시 누르면 좋아요가 취소된다). -->
+  <nav aria-label="기본"><a role="link" href="/"><svg aria-label="홈"></svg></a></nav>
+  <main>
+    <article>
+      <header><a role="link" href="/office_daily_kim/">office_daily_kim</a></header>
+      <section><span id="like" role="button"><svg aria-label="좋아요" width="24" height="24"></svg></span></section>
+    </article>
+  </main>
+  <script>
+    const like = document.getElementById('like');
+    const icon = like.querySelector('svg');
+    like.addEventListener('click', () => icon.setAttribute('aria-label', '좋아요 취소'));
+  </script>
+</body></html>

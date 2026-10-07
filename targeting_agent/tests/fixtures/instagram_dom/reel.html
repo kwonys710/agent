@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>릴스</title></head>
+<body>
+  <nav aria-label="기본"><a role="link" href="/"><svg aria-label="홈"></svg></a></nav>
+  <main>
+    <article>
+      <header><a role="link" href="/office_daily_kim/">office_daily_kim</a></header>
+      <h1>퇴근 후 카페에서 마무리 #직장인 #퇴근후 #카페</h1>
+      <section>
+        <span id="like" role="button"><svg aria-label="좋아요" width="24" height="24"></svg></span>
+      </section>
+      <form id="comment-form">
+        <textarea aria-label="댓글 달기..."></textarea>
+        <div role="button" id="submit">게시</div>
+      </form>
+      <ul id="comments"></ul>
+    </article>
+  </main>
+  <script>
+    const like = document.getElementById('like');
+    like.addEventListener('click', () => {
+      const icon = like.querySelector('svg');
+      const liked = icon.getAttribute('aria-label') === '좋아요 취소';
+      icon.setAttribute('aria-label', liked ? '좋아요' : '좋아요 취소');
+    });
+    const form = document.getElementById('comment-form');
+    const box = form.querySelector('textarea');
+    document.getElementById('submit').addEventListener('click', () => {
+      if (!box.value.trim()) return;
+      const li = document.createElement('li');
+      li.textContent = box.value;
+      document.getElementById('comments').appendChild(li);
+      box.value = '';
+    });
+  </script>
+</body></html>

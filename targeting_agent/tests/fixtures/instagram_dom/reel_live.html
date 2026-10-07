@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>릴스(LIVE 검증용)</title></head>
+<body>
+  <!-- Phase 18E: 좋아요가 **새로고침 후에도 남는** 화면.
+       Canary는 click 성공만으로 성공을 선언하지 않고 다시 열어 확인한다.
+       그 경로를 실제 Chromium으로 검증하기 위한 fixture다. -->
+  <nav aria-label="기본"><a role="link" href="/"><svg aria-label="홈"></svg></a></nav>
+  <main>
+    <article>
+      <header><a role="link" href="/office_daily_kim/">office_daily_kim</a></header>
+      <h1>퇴근 후 카페에서 마무리 #직장인</h1>
+      <section><span id="like" role="button"><svg aria-label="좋아요" width="24" height="24"></svg></span></section>
+    </article>
+  </main>
+  <script>
+    const KEY = 'liked:reel_live';
+    const like = document.getElementById('like');
+    const icon = like.querySelector('svg');
+    // 새로고침해도 상태가 유지된다(실제 Instagram과 같은 성질).
+    if (sessionStorage.getItem(KEY) === '1') icon.setAttribute('aria-label', '좋아요 취소');
+    like.addEventListener('click', () => {
+      const liked = icon.getAttribute('aria-label') === '좋아요 취소';
+      icon.setAttribute('aria-label', liked ? '좋아요' : '좋아요 취소');
+      sessionStorage.setItem(KEY, liked ? '0' : '1');
+    });
+  </script>
+</body></html>

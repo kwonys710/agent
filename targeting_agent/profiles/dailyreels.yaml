@@ -1,0 +1,69 @@
+# DailyReels Target Profile
+# 이 파일은 코드에 하드코딩하지 않는 "내 콘텐츠 성격" 정의다.
+# 변경 시 analysis/scoring 결과가 달라지므로 version을 올리면 분석 캐시가 무효화된다.
+
+version: "1"
+language: "ko"
+
+weekday:
+  keywords:
+    - 직장인
+    - 회사원
+    - 회사
+    - 출근
+    - 퇴근
+    - 퇴근후
+    - 야근
+    - 점심
+    - 사무실
+    - 직장인일상
+    - 평일
+    - 업무
+topics_weekday:
+  - 직장생활
+  - 출퇴근
+  - 점심
+  - 퇴근후일상
+
+weekend:
+  keywords:
+    - 주말
+    - 휴식
+    - 외출
+    - 카페
+    - 맛집
+    - 나들이
+    - 브런치
+    - 산책
+    - 주말일상
+topics_weekend:
+  - 주말일상
+  - 카페
+  - 맛집
+  - 휴식
+
+shared:
+  keywords:
+    - 일상
+    - 브이로그
+    - 데일리
+    - 일상브이로그
+    - 숏폼
+    - 릴스
+    - 하루
+    - 루틴
+
+# Target에서 제외하고 싶은 성격
+avoid_keywords:
+  - 광고
+  - 협찬
+  - 공구
+  - 코인
+  - 주식리딩
+  - 도박
+  - 성인
+  - 대출
+  - 다이어트보조제
+
+preferred_media_types:
+  - REEL
