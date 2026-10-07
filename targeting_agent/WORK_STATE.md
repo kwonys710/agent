@@ -221,14 +221,41 @@ Phase 18A.5 완료: Candidate Collection Pipeline Hotfix
 - Autopilot DRY_RUN 리허설: Queue LIKE 5·COMMENT 5 → 자동 승인 10 → 실행 성공 6·보류 4
   (보류는 creator_daily_limit), 실제 쓰기 0, 브라우저 미실행
 
-Next: 운영 관찰 / v0.3 검토
+Phase 18A.6 완료: 2026 Instagram 화면 대응 (운영자 Windows PC 실기)
+- 실기에서 검색어 1개가 통째로 실패(stage=SEARCH_RESULT_NOT_FOUND / 수집 0) → 직접 화면을 열어 원인 3가지 확인
+  1) /explore/ 검색 입력창 위에 다른 DIV가 겹쳐 click()이 TimeoutError
+     → 웹 UI가 검색 제출 시 스스로 이동하는 공개 주소(/explore/search/keyword/?q=)를 1순위로,
+       막히면 기존 클릭·입력 경로로 fallback, 클릭이 가로막히면 focus + 키 입력
+  2) 검색 결과 그리드 21/21이 /p/<code>/ 였고 Reel 여부는 릴스 배지로만 보임
+     → /p/ 도 수집하고 Reel 판정은 상세의 link[rel=canonical]로. 배지는 순서만 앞당김(버리지 않음)
+  3) 상세 화면에 article/header/h1 없음 → 공개 og 태그에서 작성자·본문·반응 수·게시일 추출
+- 실기 결과: Reel 발견 49 / 수집 49 / username 100% / caption 100% / selector 오류 0 / 쓰기 0
+
+Phase 18D 완료: Live Readiness & Calibration
+- 판정 CONDITIONAL_GO (기술 준비도 READY · Target 보정 신뢰도 LOW)
+- 18D.1 감사: action_queue.executor(예정) vs interactions.executor(실제)를 Planned/Actual로 분리.
+  schema 추가 없음. 생성 주체는 run_id ↔ autopilot_runs 로 유도. 연결 끊긴 실행 기록도 감사 공백으로 검출
+- 18D.2 보정: Browser 후보가 60~70점대인 원인은 부적합이 아니라 '모름'이었다.
+  followers·posted_at 미수집 → creator_fit/activity/engagement(가중치 0.50)가 중립값에 묶여 상한 75.0점.
+  COMMENT 임계값 82는 도달 불가였다. 임계값 대신 **빠진 데이터**를 고쳤다 —
+  og:description에 이미 있던 게시 날짜를 파싱해 posted_at을 채우니 상한 75.0 → 82.5
+- 18D.3 댓글: 거절 11.5% / generic 1.6% / Template 11.5% / caption 근거 100% → Prompt 수정 근거 없음(유지)
+- 18D.4 추정: 현재 설정 하루 예상 LIKE 5 · COMMENT 5. 단 자격 후보가 전부 import CSV이고
+  Browser Discovery 후보는 0건 — 지금 수집 경로는 Action으로 이어지지 않는다
+- 18D.5 가드: 이중 스위치(mode=LIVE AND dry_run=false)만 실제 쓰기를 연다는 것을 회귀 테스트로 고정.
+  Configured/Effective를 모든 실행 시작에 한 줄로 기록
+- 18D.6 Canary: Discovery → 분석 → Queue → 승인 → Browser Executor DRY_RUN → Report 전 구간,
+  후보→실행 사슬 끊김 0, 실제 쓰기 0 (운영 DB 사본 사용)
+- 18D.7/8: `--live-readiness` 로 결정론적 보고서 생성(LLM 호출 없음)
+- 테스트 618건 통과(Phase 18D에서 130건 추가)
+
+Next: 운영자 LIVE 전환 결정 / Dashboard에서 사람 Feedback 축적
 Meta API: Optional (진행을 막지 않음)
 
 Pending:
-- 실제 Instagram Smoke(운영자 PC) — BLOCKED.md 참고. 개발 환경은 Instagram 접근 차단 + 로그인 세션 없음.
-  1) run_targeting_discovery.bat --discover-only --query "직장인"
-  2) 실패 시 stage + selector key + data/browser_debug 스크린샷만 보고(추측 반복 실행 금지)
-- LIVE 전환은 운영자 판단(browser_executor.mode / autopilot.enabled)
+- LIVE 전환은 운영자 판단(browser_executor.mode / actions.execution.dry_run 둘 다 풀어야 함)
+- 작성자 followers 수집 — Browser Discovery 후보가 Action 자격을 얻으려면 필요(18D.2)
+- 사람 Feedback 10건 이상 축적 후 임계값 재검토(그 전에는 근거 없음)
 - 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)
 - Gemini 분석/댓글 생성 실사용 검증(API Key 필요)
 - 운영 데이터 축적 후 학습 임계값(min_keyword_media 등) 재조정

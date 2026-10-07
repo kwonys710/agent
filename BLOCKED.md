@@ -1,62 +1,47 @@
-# BLOCKED — 실제 Instagram 검증 (Phase 18A.2 / 18B LIVE)
+# BLOCKED — 없음 (해소됨)
 
-최종 갱신: 2026-10-07 (Phase 18A.5 수정 반영) / 기준 커밋: Phase 18A.5
+최종 갱신: 2026-10-07 / 기준 커밋: Phase 18D
 
-## Blocker
+## 현재 Blocker
 
-`HARD_BLOCK_LOGIN` — 개발 환경에서 실제 Instagram Smoke Test를 수행할 수 없습니다.
+**없습니다.**
 
-확인한 사실(개발 환경 = Linux 컨테이너):
+이전에 기록돼 있던 `HARD_BLOCK_LOGIN`(개발 환경에서 실제 Instagram Smoke Test
+불가)은 해소되었습니다. 운영자 Windows PC에서 직접 실행해 확인했습니다.
 
-| 항목 | 상태 |
+| 항목 | 결과 (2026-10-07, 운영자 Windows PC) |
 | --- | --- |
-| `run_instagram_session.bat --check` | 실행 불가 — Windows 전용 배치, 이 환경은 Linux |
-| Instagram 로그인 세션(`data/browser_profile/`) | 없음(운영자 PC에만 존재) |
-| `https://www.instagram.com` 접근 | 차단(HTTP 응답 없음) |
-| Playwright / Chromium | 설치됨 — **로컬 DOM fixture로는 정상 동작 확인** |
+| `run_instagram_session.bat --check` | `LOGGED_IN` |
+| 실제 Instagram 검색 / 수집 | 성공 — Reel 발견 49 / 수집 49 |
+| Username / Caption 추출 | 100% / 100% |
+| Selector 치명 오류 | 0 |
+| 실제 Instagram 쓰기 | 0 (전 구간 DRY_RUN) |
 
-로그인은 운영자가 직접 해야 하고(ID/PW를 코드가 다루지 않는다는 원칙), 이 환경에서는
-Instagram에 접근 자체가 불가능합니다. 그래서 selector를 실제 Instagram DOM으로
-확인하는 단계만 운영자 PC에 남습니다.
+그 과정에서 Instagram 2026 화면 변경 3가지를 찾아 고쳤습니다(Phase 18A.6) —
+검색 입력창을 덮은 레이어, `/reel/` href가 사라진 검색 그리드, `article`/`header`/`h1`
+이 없어진 상세 화면. 자세한 내용은 커밋 `9cdba1f` 메시지에 있습니다.
 
-## 그래서 대신 한 것
+## 남은 것 — Blocker가 아니라 운영자 결정
 
-- Instagram 접근성 구조를 모사한 로컬 DOM fixture(`targeting_agent/tests/fixtures/instagram_dom/`)를
-  127.0.0.1 서버로 띄우고, **실제 Playwright + 실제 Chromium**으로 운영 selector를 검증했습니다.
-  (검색 진입 → 입력 → 결과 → 태그 페이지 → `/reel/` 수집 → username/caption 추출,
-  그리고 좋아요 토글 · 댓글 게시 · 작업 차단 감지)
-- 실패 시 `stage` + selector key + 제한된 DOM 진단 + 스크린샷을 남기도록 만들어,
-  실제 환경에서 한 번 돌리면 어디를 고쳐야 하는지 바로 나옵니다.
+LIVE 전환은 기술적으로 막혀 있지 않습니다. **운영자가 직접 결정할 일**입니다.
 
-## 2차 Smoke로 밝혀진 것 (해결 완료)
+- Phase 18D 판정: `CONDITIONAL_GO` (기술 준비도 READY · 보정 신뢰도 LOW)
+- 보고서: `targeting_agent/data/reports/live_readiness_latest.html`
+  (`python -m targeting_agent.main --live-readiness` 로 언제든 다시 생성)
 
-운영자가 보내 준 2차 결과(`발견 10 / 수집 0 / 오류 0`)로 원인을 특정해 수정했습니다.
-태그·프로필 그리드의 Reel 링크가 `/<username>/reel/<code>/` 형태라서 URL 정규화에서
-거부되고, 그 drop에 사유가 없어 오류 0으로 보였던 것입니다
-(`docs/phase18a_browser_discovery.md` Phase 18A.5 참고).
+전환 전에 알아 둘 것 두 가지:
 
-이제 같은 명령을 다시 실행하면 수집이 되고, 혹시 빠지는 건이 있어도
-`Skip 사유`와 `진단(최대 3건)`이 요약에 함께 출력됩니다.
+1. **Browser Discovery로 모은 후보는 아직 Action으로 이어지지 않습니다.**
+   작성자 followers를 수집하지 않아 `creator_fit`·`engagement` 축이 중립값에
+   묶이고, 그 때문에 점수 상한이 82.5점입니다. COMMENT 임계값(82)에 겨우 닿고
+   대부분은 못 넘습니다. 임계값을 내리는 것보다 빠진 정보를 채우는 쪽이 맞습니다.
+2. **사람 Feedback이 2건뿐이라 Target 보정 신뢰도가 LOW입니다.**
+   Dashboard에서 승인/거절을 쌓으면 신뢰도가 올라가고, 그때 임계값 조정을
+   근거 있게 검토할 수 있습니다.
 
-## 사용자가 할 최소 행동 1개
+## 아직 확인하지 못한 것(별개 사안)
 
-운영자 PC(Windows)에서 아래 한 줄을 실행하고, 출력의 `상태 / 세션 / stage / keys`를 알려 주세요.
+- 실제 Instagram 계정/토큰으로 Hashtag Discovery(Meta API 권한 심사 필요)
+- Gemini 분석/댓글 생성 실사용(API Key 필요)
 
-```bat
-run_targeting_discovery.bat --discover-only --query "직장인"
-```
-
-- 로그인이 안 되어 있으면 먼저 `run_instagram_session.bat` 으로 직접 로그인하면 됩니다.
-- 실패하면 `data/browser_debug/selector_<stage>_<시각>.png` 와 로그의 `DOM 진단` JSON 한 줄이
-  남습니다. 그 두 가지만 있으면 selector를 정확히 한 곳만 고칠 수 있습니다.
-- 전체 page HTML은 저장하지 않습니다. 쿠키·토큰·localStorage도 수집하지 않습니다.
-
-## 현재 안전 상태 (그대로 두어도 아무 일도 일어나지 않음)
-
-```
-autopilot.enabled = false        # REVIEW 모드 — 자동 승인 없음
-browser_executor.mode = DRY_RUN  # 실제 좋아요/댓글 없음
-actions.execution.dry_run = true # 강한 가드
-browser_discovery.enabled = false
-scheduler.autopilot = false
-```
+둘 다 현재 경로(Browser Discovery + Claude Code CLI)를 막지 않습니다.
