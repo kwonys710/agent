@@ -257,6 +257,7 @@ scheduler:
   # Windows Task Scheduler가 하루 1회 실행하는 배치 모드(python -m targeting_agent.main --scheduled).
   # Scheduled Run은 후보 수집·분석과 요약까지만 하고, Instagram Action은 실행하지 않는다.
   enabled: true
+  autopilot: false         # true면 Scheduled Run을 Autopilot으로 실행한다(Action은 browser_executor.mode 따름)
   process_inbox: true
   process_new_candidates: true
   max_candidates_per_run: 10

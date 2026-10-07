@@ -8,6 +8,8 @@
 - comment_drafts(media_pk, normalized_text) UNIQUE (동일 댓글 중복 저장 차단)
 - candidate_media.canonical_url UNIQUE (URL 입력 시 동일 게시물 중복 차단)
 
+v10(Phase 18C): autopilot_runs — Autopilot 실행 이력.
+
 v9(Phase 18A.3): browser_discovery_runs에 추출 품질 컬럼(username_found/caption_found/detail_failed).
 
 v8(Phase 18A): browser_discovery_runs — Browser Discovery 실행 이력(세션 상태/중단 사유 포함).
@@ -28,7 +30,7 @@ import_events 테이블 추가. 기존 DB는 core/database.py의 마이그레이
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -238,6 +240,29 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         username_found INTEGER NOT NULL DEFAULT 0,
         caption_found INTEGER NOT NULL DEFAULT 0,
         detail_failed INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autopilot_runs (
+        autopilot_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        status TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        executor_mode TEXT NOT NULL,
+        analyzed INTEGER NOT NULL DEFAULT 0,
+        queued_likes INTEGER NOT NULL DEFAULT 0,
+        queued_comments INTEGER NOT NULL DEFAULT 0,
+        approved INTEGER NOT NULL DEFAULT 0,
+        executed_success INTEGER NOT NULL DEFAULT 0,
+        executed_skipped INTEGER NOT NULL DEFAULT 0,
+        executed_failed INTEGER NOT NULL DEFAULT 0,
+        real_writes INTEGER NOT NULL DEFAULT 0,
+        claude_calls INTEGER NOT NULL DEFAULT 0,
+        cache_hits INTEGER NOT NULL DEFAULT 0,
+        errors INTEGER NOT NULL DEFAULT 0,
+        halt_reason TEXT
     )
     """,
     """

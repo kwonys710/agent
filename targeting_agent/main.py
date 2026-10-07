@@ -97,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scheduled Run(배치): inbox 처리 → 신규 후보 분석 → Daily Summary 생성",
     )
     parser.add_argument(
+        "--autopilot",
+        action="store_true",
+        help="Autopilot: Discovery → 분석 → Action 결정 → 실행(기본 DRY_RUN)까지 한 번에",
+    )
+    parser.add_argument(
         "--discover",
         action="store_true",
         help="Browser Discovery: Instagram 검색으로 Reel 후보 수집 → 저장 → 분석(읽기 전용)",
@@ -452,6 +457,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.import_only:
         return run_import_only(config, args)
+
+    if args.autopilot:
+        from .autopilot.runner import format_result as format_autopilot
+        from .autopilot.runner import run_autopilot
+
+        outcome = run_autopilot(config)
+        print(format_autopilot(outcome))
+        return outcome.exit_code
 
     if args.discover or args.discover_only:
         from .discovery.browser_runner import format_result, run_browser_discovery

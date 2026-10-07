@@ -96,6 +96,24 @@ def run_scheduled(
     now = now or datetime.now(timezone.utc)
     result = ScheduledRunResult(started_at=now.isoformat(timespec="seconds"))
 
+    if bool(config.get("scheduler.autopilot", False)):
+        # Phase 18C: Scheduled Run을 Autopilot으로 돌린다(기본은 꺼져 있다).
+        # 실제 좋아요/댓글 여부는 browser_executor.mode가 최종 결정한다(기본 DRY_RUN).
+        from ..autopilot.runner import run_autopilot
+
+        logger.info("scheduler.autopilot=true — Autopilot으로 실행합니다.")
+        outcome = run_autopilot(config, conn, now=now)
+        result.status = STATUS_OK if outcome.exit_code == 0 else STATUS_FAILED
+        result.analyzed = outcome.analyzed
+        result.needs_enrichment = outcome.needs_enrichment
+        result.processed = outcome.analyzed + outcome.needs_enrichment
+        result.claude_calls = outcome.claude_calls
+        result.cache_hits = outcome.cache_hits
+        result.errors = outcome.errors
+        result.message = f"autopilot:{outcome.status} mode={outcome.mode}"
+        result.finished_at = utc_now()
+        return result
+
     if not bool(config.get("scheduler.enabled", True)):
         result.status = STATUS_OK
         result.message = "scheduler.enabled=false — 아무 것도 하지 않았습니다."
