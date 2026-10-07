@@ -42,7 +42,11 @@ def detail_for(url: str, code: str, *, username: str = "office_daily_kim", capti
 
 
 def grid_browser(codes: list[str], extra_links: list[str] | None = None) -> FakeBrowser:
-    """실기와 같은 형태의 그리드 링크를 돌려주는 Fake."""
+    """실기와 같은 형태의 그리드 링크를 돌려주는 Fake.
+
+    Reel이 아닌 `/p/<code>/` 도 상세가 열린다 — 18A.6부터 Reel 여부는 상세가
+    밝힌 media_type으로 판정하므로, 화면이 있는데 없는 것처럼 두면 안 된다.
+    """
     links = [GRID.format(code=code) for code in codes] + list(extra_links or [])
     details = {
         f"https://www.instagram.com/reel/{code}/": detail_for(
@@ -50,6 +54,18 @@ def grid_browser(codes: list[str], extra_links: list[str] | None = None) -> Fake
         )
         for code in codes
     }
+    for link in extra_links or []:
+        try:
+            canonical = normalize_instagram_url(link).canonical_url
+        except DiscoveryError:
+            continue  # 지원하지 않는 경로는 상세를 열기 전에 걸러진다
+        if canonical in details:
+            continue
+        post = detail_for(canonical, canonical.rstrip("/").rsplit("/", 1)[-1])
+        if "/p/" in canonical:
+            post.media_type = "POST"
+        post.canonical_url = canonical
+        details[canonical] = post
     return FakeBrowser(links={QUERY: links}, details=details)
 
 
@@ -294,9 +310,7 @@ def test_수집이_있으면_success(discovery_config_18a5, conn: sqlite3.Connec
 
 def test_reel이_없으면_empty이고_실패가_아니다(discovery_config_18a5, conn: sqlite3.Connection):
     """검색·수집 경로는 정상인데 Reel이 없는 정상 상황은 FAILED가 아니다."""
-    browser = FakeBrowser(
-        links={QUERY: ["https://www.instagram.com/office_daily_kim/p/POST01/"]}, details={}
-    )
+    browser = grid_browser([], ["https://www.instagram.com/office_daily_kim/p/POST01/"])
 
     result = run_browser_discovery(
         discovery_config_18a5, conn, browser=browser, queries=[QUERY], process=False

@@ -60,6 +60,9 @@ class PostDetail:
     caption: str = ""
     hashtags: list[str] = field(default_factory=list)
     media_type: str = "REEL"
+    # 페이지가 스스로 밝힌 canonical permalink(`link[rel="canonical"]`).
+    # /p/<code>/ 로 열어도 Reel이면 /reel/<code>/ 로 나온다 — 비면 추측하지 않는다.
+    canonical_url: str = ""
     like_count: int = 0
     comment_count: int = 0
 

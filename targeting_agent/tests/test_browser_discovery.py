@@ -204,17 +204,62 @@ def test_중복_url은_한_번만_수집한다():
 
 
 def test_reel이_아니면_제외한다():
+    """Reel 여부는 상세가 밝힌 media_type으로 판정한다(18A.6).
+
+    2026 검색 그리드는 Reel도 /p/<code>/ 로 링크하므로, 주소만 보고 거르면
+    Reel이 전부 사라진다. 그래서 상세를 열어 본 뒤에 제외한다.
+    """
     post = "https://www.instagram.com/p/POST01/"
     reel = "https://www.instagram.com/reel/AAA111/"
+    photo = detail("POST01")
+    photo.media_type = "POST"
+    photo.canonical_url = post
     browser = FakeBrowser(
         links={"직장인": [post, reel]},
-        details={post: detail("POST01"), reel: detail("AAA111")},
+        details={post: photo, reel: detail("AAA111")},
     )
     discovery = InstagramBrowserDiscovery(browser, ["직장인"], media_types=("REEL",))
 
     candidates = discovery.discover()
 
     assert [c.media_id for c in candidates] == ["AAA111"]
+    assert discovery.stats.skips.get("skipped_non_reel") == 1
+
+
+def test_그리드가_p로_링크해도_reel이면_수집한다():
+    """실기 증상(Found 21 → Collected 0)의 재발 방지.
+
+    검색 그리드의 /p/<code>/ 를 열었더니 canonical이 /reel/<code>/ 였다면
+    그것은 Reel이다 — 그대로 Reel permalink로 저장한다.
+    """
+    grid_url = "https://www.instagram.com/p/AAA111/"
+    reel_detail = detail("AAA111")
+    reel_detail.permalink = grid_url
+    reel_detail.canonical_url = "https://www.instagram.com/reel/AAA111/"
+    browser = FakeBrowser(links={"직장인": [grid_url]}, details={grid_url: reel_detail})
+    discovery = InstagramBrowserDiscovery(browser, ["직장인"], media_types=("REEL",))
+
+    candidates = discovery.discover()
+
+    assert [c.canonical_url for c in candidates] == [
+        "https://www.instagram.com/reel/AAA111/"
+    ]
+    assert discovery.stats.found == 1
+    assert discovery.stats.accounted()
+
+
+def test_같은_게시물이_p와_reel로_둘다_나오면_한_건이다():
+    grid = "https://www.instagram.com/p/AAA111/"
+    reel = "https://www.instagram.com/reel/AAA111/"
+    first = detail("AAA111")
+    first.canonical_url = reel
+    browser = FakeBrowser(links={"직장인": [grid, reel]}, details={grid: first, reel: detail("AAA111")})
+    discovery = InstagramBrowserDiscovery(browser, ["직장인"], media_types=("REEL",))
+
+    candidates = discovery.discover()
+
+    assert len(candidates) == 1
+    assert discovery.stats.skips.get("skipped_duplicate_in_run") == 1
 
 
 def test_지원하지_않는_url은_조용히_건너뛴다():
@@ -629,11 +674,17 @@ class FakeLocator:
 
     def click(self, timeout: Optional[int] = None) -> None:
         self.wait_for(timeout=timeout)
+        if self.selector in self.page.block_click:
+            raise FakeTimeout(f"Timeout {timeout}ms exceeded: {self.selector} 위에 다른 요소가 있음")
         self.page.clicked.append(self.selector)
 
     def fill(self, value: str, timeout: Optional[int] = None) -> None:
         self.wait_for(timeout=timeout)
         self.page.filled.append((self.selector, value))
+
+    def focus(self, timeout: Optional[int] = None) -> None:
+        self.wait_for(timeout=timeout)
+        self.page.focused.append(self.selector)
 
     def inner_text(self, timeout: Optional[int] = None) -> str:
         self.wait_for(timeout=timeout)
@@ -643,8 +694,11 @@ class FakeLocator:
         self.wait_for(timeout=timeout)
         return self.nodes[0].get(name)
 
-    def evaluate_all(self, _expression: str) -> list[Optional[str]]:
-        return [node.get("href") for node in self.nodes]
+    def evaluate_all(self, _expression: str, arg: Optional[list] = None) -> list:
+        if arg is None:
+            return [node.get("href") for node in self.nodes]
+        # 운영 코드는 [href, Reel 배지 여부] 쌍을 받는다(18A.6).
+        return [[node.get("href"), bool(node.get("reel_badge"))] for node in self.nodes]
 
 
 class FakeMouse:
@@ -655,21 +709,39 @@ class FakeMouse:
         self.scrolls += 1
 
 
+class FakeKeyboard:
+    def __init__(self, page: "FakePage") -> None:
+        self.page = page
+
+    def type(self, text: str, **_kwargs) -> None:
+        self.page.typed.append(text)
+
+
 class FakePage:
     """selector → 노드 목록으로 이뤄진 최소 DOM. 실제 브라우저를 쓰지 않는다."""
 
-    def __init__(self, dom: dict[str, list[dict]], gated: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        dom: dict[str, list[dict]],
+        gated: tuple[str, ...] = (),
+        block_click: tuple[str, ...] = (),
+    ) -> None:
         self.dom = dom
         self.gated = set(gated)  # 검색어를 입력해야 나타나는 selector
+        self.block_click = set(block_click)  # 겹친 레이어에 가로막히는 selector
         self.url = SEL.BASE_URL + "/"
         self.clicked: list[str] = []
         self.filled: list[tuple[str, str]] = []
+        self.focused: list[str] = []
+        self.typed: list[str] = []
         self.visited: list[str] = []
         self.mouse = FakeMouse()
+        self.keyboard = FakeKeyboard(self)
         self.screenshots: list[str] = []
 
     def locator(self, selector: str) -> FakeLocator:
-        if selector in self.gated and not self.filled:
+        # 검색어가 들어가야 나타나는 요소. fill()이든 키 입력이든 들어가면 열린다.
+        if selector in self.gated and not (self.filled or self.typed):
             return FakeLocator(self, selector, [])
         return FakeLocator(self, selector, list(self.dom.get(selector, [])))
 
@@ -715,10 +787,52 @@ def search_dom(entry: str, input_selector: str) -> dict[str, list[dict]]:
     }
 
 
+# 공개 검색 주소로는 결과가 안 나오고 UI 네비게이션이 필요한 화면을 만든다.
+# (18A.6: search()는 공개 주소를 먼저 시도하고, 실패하면 클릭·입력으로 되돌아간다)
+NAV_GATED = (SEL.SEARCH_RESULT_HASHTAG[0][1], SEL.RESULT_PAGE_MARKERS[0][1])
+
+
+def test_공개_검색_주소로_결과_화면에_바로_간다(tmp_path: Path):
+    """1순위는 Instagram 웹 UI가 스스로 이동하는 공개 결과 주소다.
+
+    실기에서 검색 입력창 위에 겹친 레이어 때문에 click()이 TimeoutError로
+    막혔고(검색어 1개 실패 / 수집 0건), 사람이 보는 결과 화면은 이 주소였다.
+    """
+    page = FakePage({SEL.RESULT_PAGE_MARKERS[0][1]: [{"href": "/p/AAA111/"}]})
+
+    make_browser(page, tmp_path).search("직장인")
+
+    assert page.visited == ["https://www.instagram.com/explore/search/keyword/?q=%EC%A7%81%EC%9E%A5%EC%9D%B8"]
+    assert page.clicked == []  # 입력창을 건드리지 않았다
+
+
+def test_공개_주소가_막히면_ui_네비게이션으로_되돌아간다(tmp_path: Path):
+    entry = dict(SEL.SEARCH_ENTRY)["nav_search_aria_ko"]
+    box = dict(SEL.SEARCH_INPUT)["input_placeholder_ko"]
+    page = FakePage(search_dom(entry, box), gated=NAV_GATED)
+
+    make_browser(page, tmp_path).search("직장인")
+
+    assert page.clicked[0] == entry
+    assert page.filled == [(box, "직장인")]
+
+
+def test_검색창_클릭이_막히면_focus_입력으로_넘어간다(tmp_path: Path):
+    """겹친 레이어 때문에 click()이 막혀도 입력 자체는 포기하지 않는다."""
+    entry = dict(SEL.SEARCH_ENTRY)["nav_search_aria_ko"]
+    box = dict(SEL.SEARCH_INPUT)["input_placeholder_ko"]
+    page = FakePage(search_dom(entry, box), gated=NAV_GATED, block_click=(box,))
+
+    make_browser(page, tmp_path).search("직장인")
+
+    assert page.typed == ["직장인"]
+    assert page.focused == [box]
+
+
 def test_한국어_ui_검색_라벨로_진입한다(tmp_path: Path):
     entry = dict(SEL.SEARCH_ENTRY)["nav_search_aria_ko"]
     box = dict(SEL.SEARCH_INPUT)["input_placeholder_ko"]
-    page = FakePage(search_dom(entry, box), gated=(SEL.SEARCH_RESULT_HASHTAG[0][1],))
+    page = FakePage(search_dom(entry, box), gated=NAV_GATED)
 
     make_browser(page, tmp_path).search("직장인")
 
@@ -729,7 +843,7 @@ def test_한국어_ui_검색_라벨로_진입한다(tmp_path: Path):
 def test_영어_ui_검색_라벨로도_진입한다(tmp_path: Path):
     entry = dict(SEL.SEARCH_ENTRY)["nav_search_aria_en"]
     box = dict(SEL.SEARCH_INPUT)["input_placeholder_en"]
-    page = FakePage(search_dom(entry, box), gated=(SEL.SEARCH_RESULT_HASHTAG[0][1],))
+    page = FakePage(search_dom(entry, box), gated=NAV_GATED)
 
     make_browser(page, tmp_path).search("직장인")
 
@@ -739,7 +853,7 @@ def test_영어_ui_검색_라벨로도_진입한다(tmp_path: Path):
 def test_검색_입력_selector는_대체안으로_넘어간다(tmp_path: Path):
     entry = dict(SEL.SEARCH_ENTRY)["nav_search_svg_ko"]
     box = dict(SEL.SEARCH_INPUT)["input_role_searchbox"]  # placeholder 계열이 없는 경우
-    page = FakePage(search_dom(entry, box), gated=(SEL.SEARCH_RESULT_HASHTAG[0][1],))
+    page = FakePage(search_dom(entry, box), gated=NAV_GATED)
 
     make_browser(page, tmp_path).search("직장인")
 
@@ -756,7 +870,7 @@ def test_해시태그_결과가_없으면_계정_결과로_넘어간다(tmp_path
         account: [{"href": "/office_daily_kim/"}],
         SEL.RESULT_PAGE_MARKERS[0][1]: [{"href": "/reel/AAA111/"}],
     }
-    page = FakePage(dom, gated=(account,))
+    page = FakePage(dom, gated=(account, SEL.RESULT_PAGE_MARKERS[0][1]))
 
     make_browser(page, tmp_path).search("직장인")
 
@@ -773,7 +887,7 @@ def test_검색_입력을_못_찾으면_stage와_selector키를_알려준다(tmp
 
     assert exc.value.stage == SelectorStage.SEARCH_INPUT.value
     assert "input_placeholder_ko" in exc.value.tried
-    assert page.screenshots and "search_input" in page.screenshots[0]
+    assert any("search_input" in shot for shot in page.screenshots)
 
 
 def test_검색_진입_실패도_stage로_구분된다(tmp_path: Path):
@@ -802,6 +916,33 @@ def test_reel_href만_수집하고_중복을_제거한다(tmp_path: Path):
     assert links == [
         "https://www.instagram.com/reel/AAA111/",
         "https://www.instagram.com/reel/BBB222/",
+    ]
+
+
+def test_그리드의_p링크도_모으고_reel_배지가_앞선다(tmp_path: Path):
+    """2026 검색 그리드는 Reel도 /p/<code>/ 로 링크한다(18A.6).
+
+    주소로는 구분되지 않으므로 타일의 릴스 배지로 **순서만** 앞당긴다.
+    배지가 없는 타일도 버리지 않는다 — 최종 판정은 상세의 canonical이 한다.
+    """
+    selector = dict(SEL.POST_LINK_SELECTORS)["post_href_main"]
+    page = FakePage(
+        {
+            selector: [
+                {"href": "/p/PHOTO1/"},
+                {"href": "/p/AAA111/", "reel_badge": True},
+                {"href": "/p/AAA111/", "reel_badge": True},  # 같은 타일이 두 번
+                {"href": "/p/BBB222/", "reel_badge": True},
+            ]
+        }
+    )
+
+    links = make_browser(page, tmp_path).collect_post_links(10)
+
+    assert links == [
+        "https://www.instagram.com/p/AAA111/",
+        "https://www.instagram.com/p/BBB222/",
+        "https://www.instagram.com/p/PHOTO1/",
     ]
 
 

@@ -70,8 +70,23 @@ def browser(dom_server: str, tmp_path_factory: pytest.TempPathFactory) -> Iterat
         page.close()
 
 
-def test_실제_chromium에서_검색_흐름이_끝까지_돈다(browser: PlaywrightBrowser):
+def test_실제_chromium에서_공개_검색_주소로_결과_화면에_간다(browser: PlaywrightBrowser):
+    """18A.6: 검색은 웹 UI가 스스로 이동하는 공개 결과 주소를 먼저 쓴다."""
     browser.search("직장인")
+
+    assert "/explore/search/keyword/" in browser._page.url
+    assert browser._page.locator('main a[href*="/p/"]').count() > 0
+
+
+def test_실제_chromium에서_공개_주소가_막히면_ui로_되돌아간다(browser: PlaywrightBrowser, dom_server: str):
+    """공개 주소에 결과 화면이 없으면 예전처럼 클릭·입력으로 간다."""
+    original = browser.base_url
+    # 홈과 태그 페이지는 있는데 공개 검색 주소만 없는 서버
+    browser.base_url = f"{dom_server}/nosearchurl"
+    try:
+        browser.search("직장인")
+    finally:
+        browser.base_url = original
 
     # 해시태그 결과를 눌러 공개 태그 페이지에 도착했다.
     assert browser._page.url.endswith("tag.html")
@@ -82,7 +97,9 @@ def test_실제_chromium에서_reel_링크를_중복없이_수집한다(browser:
 
     links = browser.collect_post_links(10)
 
-    assert links == [f"{dom_server}/reel/AAA111/", f"{dom_server}/reel/BBB222/"]
+    # Reel 링크가 먼저 오고, 같은 그리드의 일반 게시물도 버리지 않는다(18A.6).
+    assert links[:2] == [f"{dom_server}/reel/AAA111/", f"{dom_server}/reel/BBB222/"]
+    assert links[2:] == [f"{dom_server}/p/POST01/"]
 
 
 def test_실제_chromium에서_username과_caption을_읽는다(browser: PlaywrightBrowser, dom_server: str):
@@ -175,3 +192,53 @@ def test_실기_그리드_href는_username이_앞에_붙는다(browser: Playwrig
         canonical.add(normalize_instagram_url("https://www.instagram.com" + path).canonical_url)
     assert "https://www.instagram.com/reel/AAA111/" in canonical
     assert "https://www.instagram.com/reel/DDD444/" in canonical
+
+
+# ===========================================================================
+# Phase 18A.6 — 2026 화면에서 "Found 21 → Collected 0" 이던 원인 재현
+# ===========================================================================
+def test_2026_그리드는_p링크뿐이고_릴스_배지가_앞선다(browser: PlaywrightBrowser, dom_server: str):
+    """검색 결과 그리드에는 /reel/ href가 하나도 없다(실기 21/21).
+
+    /p/ 를 안 모으면 수집이 0건이 된다. 배지가 달린 타일을 앞에 둔다.
+    """
+    browser.goto(f"{dom_server}/explore/search/keyword/")
+
+    links = browser.collect_post_links(10)
+
+    assert links == [
+        f"{dom_server}/p/AAA111/",
+        f"{dom_server}/p/BBB222/",
+        f"{dom_server}/p/PHOTO1/",
+    ]
+
+
+def test_2026_상세는_canonical과_메타태그로_읽는다(browser: PlaywrightBrowser, dom_server: str):
+    """article/header/h1이 없는 화면에서도 작성자·본문·Reel 여부를 읽는다."""
+    post = browser.open_post(f"{dom_server}/post_2026.html")
+
+    assert post is not None
+    assert post.canonical_url == "https://www.instagram.com/reel/AAA111/"
+    assert post.media_type == "REEL"          # /p/ 로 열어도 canonical이 Reel이다
+    assert post.username == "office_daily_kim"
+    assert post.caption.startswith("퇴근 후 카페에서 마무리")
+    assert post.hashtags == ["직장인", "퇴근후", "카페"]
+    assert post.like_count == 9367 and post.comment_count == 62
+    # 화면에 섞여 있는 댓글 텍스트를 caption으로 가져오지 않는다.
+    assert "저도 그 카페" not in post.caption
+
+
+def test_canonical이_일반_게시물이면_reel로_보지_않는다(browser: PlaywrightBrowser, dom_server: str):
+    post = browser.open_post(f"{dom_server}/post_2026_photo.html")
+
+    assert post is not None
+    assert post.media_type == "POST"
+    assert post.username == "photo_only_kim"
+
+
+def test_상세_주소의_예약_경로를_작성자로_읽지_않는다(browser: PlaywrightBrowser, dom_server: str):
+    """/reels/audio/... /explore/... 같은 링크는 프로필이 아니다."""
+    post = browser.open_post(f"{dom_server}/post_2026.html")
+
+    assert post is not None
+    assert post.username not in {"reels", "explore"}

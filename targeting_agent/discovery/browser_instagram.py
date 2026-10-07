@@ -22,10 +22,12 @@
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence
+from urllib.parse import quote
 
 from ..core.exceptions import BrowserSessionError, DiscoveryError, SelectorMismatch
 from ..core.logger import get_logger
@@ -45,19 +47,27 @@ from .browser_models import (
     SelectorStage,
     SessionState,
 )
+from .browser_post_meta import parse_post_meta
 from .browser_selectors import (
     BASE_URL,
+    CANONICAL_SELECTOR,
     CAPTION_SELECTORS,
     CHALLENGE_TEXTS,
     LOGGED_IN_MARKERS,
     LOGIN_REQUIRED_MARKERS,
     LOGIN_TEXTS,
+    OG_DESCRIPTION_SELECTOR,
+    OG_TITLE_SELECTOR,
     POST_LINK_SELECTORS,
+    PROFILE_RESERVED_SEGMENTS,
+    REEL_BADGE_LABELS,
     RESULT_PAGE_MARKERS,
     SEARCH_ENTRY,
     SEARCH_INPUT,
     SEARCH_RESULT_ACCOUNT,
     SEARCH_RESULT_HASHTAG,
+    SEARCH_URL_TEMPLATE,
+    USERNAME_FALLBACK_SELECTORS,
     USERNAME_SELECTORS,
     WARNING_TEXTS,
     keys_of,
@@ -141,12 +151,21 @@ class PlaywrightBrowser:
         page = self._require_page()
         page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
 
-    def _locate(self, stage: SelectorStage, entries: Sequence[tuple[str, str]]) -> tuple[str, Any]:
+    def _locate(
+        self,
+        stage: SelectorStage,
+        entries: Sequence[tuple[str, str]],
+        *,
+        quiet: bool = False,
+    ) -> tuple[str, Any]:
         """단계 하나에 **대기 예산을 한 번만** 쓴다.
 
         selector마다 timeout을 걸면 후보 7개 × 4초 = 28초가 되어 오히려 느려진다.
         그래서 후보 전체를 즉시 확인(count/is_visible)하고, 없으면 잠깐 기다렸다가
         다시 확인하는 방식으로 `selector_timeout_ms` 안에서 끝낸다.
+
+        `quiet=True`는 "실패해도 다음 경로가 있는" 확인용이다 — 대체 경로가 남아
+        있는데 진단과 스크린샷을 남기면 정상 동작이 오류처럼 쌓인다.
         """
         page = self._require_page()
         deadline = time.monotonic() + max(self.selector_timeout_ms, 200) / 1000
@@ -163,11 +182,18 @@ class PlaywrightBrowser:
             if time.monotonic() >= deadline:
                 break
             page.wait_for_timeout(250)  # 로딩 대기(사람 흉내가 아니라 렌더 대기)
-        logger.warning(
-            "selector 미일치 stage=%s keys=%s", stage.value, ",".join(keys_of(tuple(entries)))
-        )
-        self.diagnose(stage.name)
-        self.capture_debug(f"selector_{stage.short}")
+        if quiet:
+            logger.debug(
+                "selector 미일치(대체 경로 있음) stage=%s keys=%s",
+                stage.value,
+                ",".join(keys_of(tuple(entries))),
+            )
+        else:
+            logger.warning(
+                "selector 미일치 stage=%s keys=%s", stage.value, ",".join(keys_of(tuple(entries)))
+            )
+            self.diagnose(stage.name)
+            self.capture_debug(f"selector_{stage.short}")
         raise SelectorMismatch(stage.value, keys_of(tuple(entries)), last_error)
 
     def _text_of(self, stage: SelectorStage, entries: Sequence[tuple[str, str]]) -> str:
@@ -204,23 +230,39 @@ class PlaywrightBrowser:
         return ""
 
     def _hrefs(self, entries: Sequence[tuple[str, str]]) -> list[str]:
-        """현재 화면에서 href를 모은다(요소가 없으면 빈 목록 — 대기하지 않는다)."""
+        """현재 화면에서 게시물 링크를 모은다(요소가 없으면 빈 목록 — 대기하지 않는다).
+
+        Reel 배지가 달린 타일을 **앞으로** 놓는다. 2026 검색 그리드는 Reel도
+        `/p/<code>/` 로 링크해서 주소만으로는 구분되지 않는데, 타일에 붙은
+        릴스 아이콘은 화면에 그대로 보이는 정보다. 버리지는 않고 순서만 바꾼다 —
+        한정된 예산을 Reel에 먼저 쓰기 위한 것이고, 최종 판정은 상세의 canonical이 한다.
+        """
         page = self._require_page()
-        found: list[str] = []
+        reels: list[str] = []
+        others: list[str] = []
+        seen: set[str] = set()
         for _key, selector in entries:
             try:
                 values = page.locator(selector).evaluate_all(
-                    "nodes => nodes.map(n => n.getAttribute('href'))"
+                    """(nodes, labels) => nodes.map(n => [
+                        n.getAttribute('href'),
+                        Array.from(n.querySelectorAll('svg[aria-label]'))
+                             .some(s => labels.includes(s.getAttribute('aria-label')))
+                    ])""",
+                    list(REEL_BADGE_LABELS),
                 )
             except Exception:  # noqa: BLE001 - 다음 selector를 시도한다
                 continue
-            for href in values or []:
+            for item in values or []:
+                href, badged = (item or [None, False])[0], bool((item or [None, False])[1])
                 if not href:
                     continue
                 url = href if href.startswith("http") else self.base_url + href
-                if url not in found:
-                    found.append(url)
-        return found
+                if url in seen:
+                    continue
+                seen.add(url)
+                (reels if badged or "/reel" in url else others).append(url)
+        return reels + others
 
     # --- 읽기 ------------------------------------------------------------
     def session_state(self) -> SessionState:
@@ -244,31 +286,87 @@ class PlaywrightBrowser:
         return SessionState.UNKNOWN
 
     def search(self, query: str) -> None:
-        """공개 Web UI를 클릭·입력으로 따라간다(비공개 endpoint를 추측하지 않는다)."""
+        """공개 검색 결과 화면으로 간다(비공개 endpoint를 추측하지 않는다).
+
+        1순위는 Instagram 웹 UI가 검색 제출 시 **스스로 이동하는 공개 주소**다
+        (`/explore/search/keyword/?q=...`). 2026 화면에서는 검색 입력창 위에
+        투명 레이어가 겹쳐 `click()`이 가로막히는데(실기 확인), 사람이 보는 결과
+        화면은 이 주소와 같다. 주소로 바로 가면 그 레이어와 무관하게 동작한다.
+
+        이 경로가 막히면 예전처럼 클릭·입력 네비게이션으로 되돌아간다.
+        """
+        try:
+            self._search_by_public_url(query)
+            return
+        except SelectorMismatch as exc:
+            logger.info(
+                "공개 검색 주소로 결과를 확인하지 못해 UI 네비게이션으로 재시도합니다 (stage=%s)",
+                exc.stage,
+            )
+        self._search_by_navigation(query)
+
+    def _search_by_public_url(self, query: str) -> None:
+        self.goto(self._search_url(query))
+        self._require_page().wait_for_load_state("domcontentloaded")
+        # 실패해도 UI 네비게이션이 남아 있으니 진단/스크린샷은 남기지 않는다.
+        key, _marker = self._locate(SelectorStage.RESULT_PAGE, RESULT_PAGE_MARKERS, quiet=True)
+        logger.debug("검색 결과 화면(공개 주소) selector=%s", key)
+
+    def _search_by_navigation(self, query: str) -> None:
         page = self._require_page()
         self.goto(self._home_url())
 
         key, entry = self._locate(SelectorStage.SEARCH_ENTRY, SEARCH_ENTRY)
         logger.debug("검색 진입 selector=%s", key)
-        entry.click(timeout=self.selector_timeout_ms)
+        self._act(SelectorStage.SEARCH_ENTRY, key, lambda: entry.click(timeout=self.selector_timeout_ms))
 
         key, box = self._locate(SelectorStage.SEARCH_INPUT, SEARCH_INPUT)
         logger.debug("검색 입력 selector=%s", key)
-        box.click(timeout=self.selector_timeout_ms)
-        box.fill(query, timeout=self.selector_timeout_ms)
+        self._act(SelectorStage.SEARCH_INPUT, key, lambda: self._type_query(box, query))
 
         # 결과 목록에서 공개 결과 페이지로 한 단계만 들어간다(과도한 depth 탐색 금지).
-        target = None
         try:
-            key, target = self._locate(SelectorStage.SEARCH_RESULT, SEARCH_RESULT_HASHTAG)
+            key, target = self._locate(
+                SelectorStage.SEARCH_RESULT, SEARCH_RESULT_HASHTAG, quiet=True
+            )
         except SelectorMismatch:
             key, target = self._locate(SelectorStage.SEARCH_RESULT, SEARCH_RESULT_ACCOUNT)
         logger.debug("검색 결과 selector=%s", key)
-        target.click(timeout=self.selector_timeout_ms)
+        self._act(SelectorStage.SEARCH_RESULT, key, lambda: target.click(timeout=self.selector_timeout_ms))
 
         page.wait_for_load_state("domcontentloaded")
         key, _marker = self._locate(SelectorStage.RESULT_PAGE, RESULT_PAGE_MARKERS)
         logger.debug("결과 페이지 selector=%s", key)
+
+    def _search_url(self, query: str) -> str:
+        template = SEARCH_URL_TEMPLATE.replace(BASE_URL, self.base_url.rstrip("/"), 1)
+        return template.format(query=quote(query, safe=""))
+
+    def _type_query(self, box: Any, query: str) -> None:
+        """입력창을 채운다. 클릭이 겹친 레이어에 막히면 focus + 키 입력으로 넘어간다."""
+        page = self._require_page()
+        try:
+            box.click(timeout=self.selector_timeout_ms)
+            box.fill(query, timeout=self.selector_timeout_ms)
+            return
+        except Exception as exc:  # noqa: BLE001 - 아래 경로로 한 번 더 시도한다
+            logger.debug("검색창 클릭 입력 실패(%s) — focus 입력으로 전환", type(exc).__name__)
+        box.focus(timeout=self.selector_timeout_ms)
+        page.keyboard.type(query)
+
+    def _act(self, stage: SelectorStage, key: str, action: Any) -> None:
+        """동작 실패를 **그 단계 이름 그대로** 보고한다(stage가 뭉개지지 않도록)."""
+        try:
+            action()
+        except SelectorMismatch:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "동작 실패 stage=%s key=%s type=%s", stage.value, key, type(exc).__name__
+            )
+            self.diagnose(stage.name)
+            self.capture_debug(f"action_{stage.short}")
+            raise SelectorMismatch(stage.value, (key,), type(exc).__name__) from exc
 
     def collect_post_links(self, limit: int) -> list[str]:
         page = self._require_page()
@@ -288,19 +386,94 @@ class PlaywrightBrowser:
 
     def open_post(self, url: str) -> Optional[PostDetail]:
         self.goto(url)
-        username = self._attr_of(SelectorStage.USERNAME, USERNAME_SELECTORS, "href")
-        caption = self._text_of(SelectorStage.CAPTION, CAPTION_SELECTORS)
+        page = self._require_page()
+
+        canonical = self._attr_one(CANONICAL_SELECTOR, "href")
+        meta = parse_post_meta(
+            og_description=self._attr_one(OG_DESCRIPTION_SELECTOR, "content"),
+            og_title=self._attr_one(OG_TITLE_SELECTOR, "content"),
+        )
+
+        # username: 예전 레이아웃 → 본문 영역 프로필 링크 → 공개 메타태그 순.
+        username = self._username_from_href(
+            self._attr_of(SelectorStage.USERNAME, USERNAME_SELECTORS, "href")
+        )
+        if not username:
+            username = self._username_from_profile_links()
+        if not username:
+            username = meta.username
+
+        # caption: 공개 메타태그(= 이 permalink의 본문)를 먼저 믿는다.
+        # 화면 DOM에는 댓글·인접 Reel 본문이 섞여 들어오기 때문이다(18A.6).
+        caption = meta.caption or self._text_of(SelectorStage.CAPTION, CAPTION_SELECTORS)
+
         if not username and not caption:
             # 화면 자체를 읽지 못했다 — 빈 값으로 추측해 저장하지 않는다.
             self.capture_debug(f"selector_{SelectorStage.POST_DETAIL.short}")
             return None
+
+        permalink = canonical or url
+        media_type = self._media_type_of(permalink, url, has_video=page.locator("video").count() > 0)
         return PostDetail(
-            permalink=url,
-            username=(username or "").strip("/").split("/")[0],
-            caption=caption or "",
-            hashtags=extract_hashtags(caption or ""),
-            media_type="REEL" if "/reel/" in url else "POST",
+            permalink=permalink,
+            canonical_url=canonical,
+            username=username,
+            caption=caption,
+            hashtags=extract_hashtags(caption),
+            media_type=media_type,
+            like_count=meta.like_count or 0,
+            comment_count=meta.comment_count or 0,
         )
+
+    def _attr_one(self, selector: str, attribute: str) -> str:
+        """단일 요소의 속성을 읽는다(없으면 빈 문자열 — 대기하지 않는다)."""
+        page = self._require_page()
+        try:
+            locator = page.locator(selector).first
+            if not locator.count():
+                return ""
+            return (locator.get_attribute(attribute, timeout=self.selector_timeout_ms) or "").strip()
+        except Exception:  # noqa: BLE001 - 못 읽으면 다른 경로로 넘어간다
+            return ""
+
+    @staticmethod
+    def _username_from_href(href: str) -> str:
+        """`/<username>/...` 에서 username만 뽑는다. 예약 경로면 빈 문자열."""
+        segment = (href or "").strip().split("?")[0].strip("/").split("/")[0]
+        if not segment or segment.lower() in PROFILE_RESERVED_SEGMENTS:
+            return ""
+        return segment if re.fullmatch(r"[A-Za-z0-9._]{1,30}", segment) else ""
+
+    def _username_from_profile_links(self) -> str:
+        """본문 영역 링크 중 **첫 프로필 링크**를 작성자로 본다(18A.6 레이아웃)."""
+        page = self._require_page()
+        for _key, selector in USERNAME_FALLBACK_SELECTORS:
+            try:
+                hrefs = page.locator(selector).evaluate_all(
+                    "nodes => nodes.slice(0, 40).map(n => n.getAttribute('href'))"
+                )
+            except Exception:  # noqa: BLE001 - 다음 후보를 시도한다
+                continue
+            for href in hrefs or []:
+                username = self._username_from_href(href or "")
+                if username:
+                    return username
+        return ""
+
+    @staticmethod
+    def _media_type_of(permalink: str, opened_url: str, *, has_video: bool) -> str:
+        """Reel 여부는 **페이지가 밝힌 canonical**을 1순위로 본다.
+
+        2026 검색 그리드는 Reel도 `/p/<code>/` 로 링크하므로, 연 주소만 보고
+        판정하면 전부 POST가 된다(실기에서 수집 0건이 된 원인).
+        """
+        for url in (permalink, opened_url):
+            if "/reel/" in url or "/reels/" in url:
+                return "REEL"
+        if "/p/" in permalink:
+            # canonical이 /p/ 라고 분명히 말하면 그대로 따른다(영상이어도 Reel이 아니다).
+            return "POST"
+        return "REEL" if has_video else "POST"
 
     def diagnose(self, stage: str) -> Optional[dict[str, Any]]:
         """실패한 단계의 화면 구조만 JSON 한 줄로 남긴다(HTML/쿠키 수집 없음)."""
@@ -492,17 +665,17 @@ class InstagramBrowserDiscovery(DiscoverySource):
             result.skip(SKIP_INVALID_URL)
             self._sample(result, link, skip=SKIP_INVALID_URL, detail=str(exc)[:60])
             return None
-        if normalized.media_type not in self.media_types:
-            result.skip(SKIP_NON_REEL)
-            self._sample(result, link, skip=SKIP_NON_REEL, media_type=normalized.media_type)
-            return None
-        result.found += 1  # 여기까지 온 것만 '실제 Reel permalink'로 센다
-        if normalized.canonical_url in seen:
+        # 중복 판정은 shortcode로 한다 — 같은 게시물이 /p/<code>/ 와 /reel/<code>/
+        # 두 형태로 동시에 나와도 한 건으로 센다(18A.6 검색 그리드).
+        if normalized.shortcode in seen:
             result.skip(SKIP_DUPLICATE_IN_RUN)
             self._sample(result, link, skip=SKIP_DUPLICATE_IN_RUN)
             return None
-        seen.add(normalized.canonical_url)
+        seen.add(normalized.shortcode)
 
+        # 2026 검색 그리드는 Reel도 /p/<code>/ 로 링크한다. 주소만 보고 거르면
+        # Reel이 전부 사라지므로(실기 수집 0건의 원인), 상세를 열어 **페이지가
+        # 밝힌 canonical**로 판정한다.
         detail = self.browser.open_post(normalized.canonical_url)
         if detail is None:
             self.stats.detail_failed += 1
@@ -518,9 +691,22 @@ class InstagramBrowserDiscovery(DiscoverySource):
             self.browser.capture_debug(f"selector_{SelectorStage.POST_DETAIL.short}")
             return None
 
+        if detail.media_type not in self.media_types:
+            result.skip(SKIP_NON_REEL)
+            self._sample(result, link, skip=SKIP_NON_REEL, media_type=detail.media_type)
+            return None
+        result.found += 1  # 여기까지 온 것만 '실제 Reel permalink'로 센다
+
+        # 상세가 밝힌 canonical을 우선 쓴다(/p/ 로 열었어도 Reel permalink로 저장된다).
+        permalink = detail.canonical_url or detail.permalink or normalized.canonical_url
+        try:
+            permalink = normalize_instagram_url(permalink).canonical_url
+        except DiscoveryError:
+            permalink = normalized.canonical_url
+
         # URL 정규화와 후보 생성은 Phase 12A 구현을 그대로 쓴다.
         candidate = candidate_from_url(
-            normalized.canonical_url,
+            permalink,
             # 상세에서 못 읽었으면 URL 경로의 username을 쓴다(둘 다 없으면 unresolved).
             username=detail.username or normalized.username or None,
             caption=detail.caption,
