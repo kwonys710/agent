@@ -1,6 +1,6 @@
 # Targeting Agent 작업 상태
 
-Current Phase: 18C.1 완료 (Autopilot + 품질 모니터링 — 실기 Instagram Smoke만 대기)
+Current Phase: 18A.5 완료 (수집 파이프라인 Hotfix — 실기 재실행 대기)
 
 Completed:
 - Phase 1: 구조 / config.yaml / .env.example / SQLite / Logging
@@ -205,6 +205,21 @@ Phase 18C.1 완료: 운영 품질 모니터링
 최종 안전 상태: autopilot.enabled=false · browser_executor.mode=DRY_RUN ·
 actions.execution.dry_run=true · scheduler.autopilot=false · browser_discovery.enabled=false
 개발 중 실제 Instagram 쓰기 0건.
+
+Phase 18A.5 완료: Candidate Collection Pipeline Hotfix
+- 실기 2차 Smoke: LOGGED_IN / 발견 10 / 수집 0 / 오류 0 → 원인 특정
+- 원인: 태그·프로필 그리드의 /<username>/reel/<code>/ 형태를 Phase 12A PATH_RE가 거부,
+  _collect_one이 사유 없이 drop(silent skip) → 상세 페이지는 한 번도 열리지 않았다
+- url_input.PATH_RE 확장(/<username>/reel|p|tv/<code>/, /reels/videos/<code>/),
+  canonical은 그대로 하나. 예약 경로(explore/stories/direct/accounts)는 계속 거부
+- POST_LINK_SELECTORS에 /reels/ 추가
+- 모든 drop에 skip 사유 counter + links=collected+skip+상세실패 자가 검증 + 첫 3건 구조화 진단
+- counter 의미 분리(result page / 링크 / Reel 발견 / 수집), EMPTY 상태 추가
+- URL 경로 username을 상세 실패 시 보조로 사용
+- 테스트 25개 추가(+ 실제 Chromium 실기 형태 fixture). 전체 465 passed
+- 오프라인 리허설: 링크 9 → Reel 7 → 수집 7 / username 86% / caption 86% / Claude 0 / 쓰기 0
+- Autopilot DRY_RUN 리허설: Queue LIKE 5·COMMENT 5 → 자동 승인 10 → 실행 성공 6·보류 4
+  (보류는 creator_daily_limit), 실제 쓰기 0, 브라우저 미실행
 
 Next: 운영 관찰 / v0.3 검토
 Meta API: Optional (진행을 막지 않음)

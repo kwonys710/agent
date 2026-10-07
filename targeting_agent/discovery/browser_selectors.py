@@ -64,8 +64,12 @@ RESULT_PAGE_MARKERS: tuple[Entry, ...] = (
 )
 
 # --- 5) Reel 링크 --------------------------------------------------------
+# 실기(Phase 18A.5)에서 확인된 형태를 모두 받는다.
+#   /reel/<code>/ · /<username>/reel/<code>/ · /reels/videos/<code>/
+# 정규화·중복 제거는 Phase 12A가 하므로 여기서는 넓게 모으기만 한다.
 POST_LINK_SELECTORS: tuple[Entry, ...] = (
     ("reel_href", 'a[href*="/reel/"]'),
+    ("reels_href", 'a[href*="/reels/"]'),
     ("reel_href_main", 'main a[href*="/reel/"]'),
 )
 

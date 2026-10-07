@@ -30,8 +30,9 @@ from .ingest import ADDED, CandidateIngestor, ImportSummary
 logger = get_logger("discovery.browser_runner")
 
 # Run 상태(18A.1). 검색어가 전부 실패했는데 OK로 남던 문제를 고친다.
-STATUS_SUCCESS = "SUCCESS"          # 실행한 검색어가 모두 성공
-STATUS_PARTIAL = "PARTIAL"          # 성공/실패 검색어가 섞임
+STATUS_SUCCESS = "SUCCESS"          # Candidate를 1건 이상 수집
+STATUS_EMPTY = "EMPTY"              # 검색·수집 경로는 정상인데 수집할 Reel이 없었다(오류 아님)
+STATUS_PARTIAL = "PARTIAL"          # 일부 성공 + 일부 실패/skip
 STATUS_FAILED = "FAILED"            # 실행한 검색어가 전부 실패(또는 실행 자체 실패)
 STATUS_SESSION_STOPPED = "SESSION_STOPPED"
 STATUS_LOCKED = "LOCKED"
@@ -49,8 +50,10 @@ class BrowserDiscoveryResult:
     finished_at: str = ""
     session_state: str = SessionState.UNKNOWN.value
     queries: int = 0
-    found: int = 0
-    collected: int = 0
+    routes: int = 0        # 검색 결과에서 열어 본 공개 result page 수
+    links: int = 0         # 결과 페이지에서 본 링크 수(Reel 판정 전)
+    found: int = 0         # 실제 /reel/ permalink 수
+    collected: int = 0     # Ingestion으로 넘긴 Candidate 수
     added: int = 0
     duplicate: int = 0
     invalid: int = 0
@@ -62,6 +65,8 @@ class BrowserDiscoveryResult:
     selector_errors: int = 0   # 화면 구조(selector) 오류
     ok_queries: int = 0
     failed_queries: int = 0
+    skips: dict[str, int] = field(default_factory=dict)
+    samples: list[dict[str, str]] = field(default_factory=list)
     # 추출 품질(Phase 18A.3)
     username_found: int = 0
     caption_found: int = 0
@@ -89,7 +94,13 @@ class BrowserDiscoveryResult:
     @property
     def exit_code(self) -> int:
         """후보 1건의 실패는 실패로 보지 않는다. 실행이 목적을 이루지 못했을 때만 non-zero."""
-        if self.status in (STATUS_SUCCESS, STATUS_PARTIAL, STATUS_DISABLED, STATUS_LOCKED):
+        if self.status in (
+            STATUS_SUCCESS,
+            STATUS_PARTIAL,
+            STATUS_EMPTY,
+            STATUS_DISABLED,
+            STATUS_LOCKED,
+        ):
             return 0
         return 1
 
@@ -283,20 +294,30 @@ def _discover(
     result.username_found = stats.username_found
     result.caption_found = stats.caption_found
     result.detail_failed = stats.detail_failed
-    result.status = _status_of(stats.ok_queries, stats.failed_queries)
+    result.routes = stats.routes
+    result.links = stats.links
+    result.skips = dict(stats.skips)
+    result.samples = list(stats.samples)
+    result.status = _status_of(stats.ok_queries, stats.failed_queries, stats.collected)
     for query in stats.queries:
         for message in query.errors:
             result.details.append(f"query={query.query} {message}")
     return candidates
 
 
-def _status_of(ok_queries: int, failed_queries: int) -> str:
-    """검색어 성공/실패 비율로 Run 상태를 정한다(전부 실패인데 OK로 남지 않게 한다)."""
+def _status_of(ok_queries: int, failed_queries: int, collected: int) -> str:
+    """Run 상태를 정한다(Phase 18A.5).
+
+    SUCCESS  수집 1건 이상
+    PARTIAL  일부 검색어 실패(수집은 있음)
+    EMPTY    검색·수집 경로는 정상인데 수집할 Reel이 없었다 — 오류가 아니다
+    FAILED   실행한 검색어가 전부 실패
+    """
     if failed_queries and ok_queries:
         return STATUS_PARTIAL
     if failed_queries:
         return STATUS_FAILED
-    return STATUS_SUCCESS
+    return STATUS_SUCCESS if collected else STATUS_EMPTY
 
 
 def _ingest(
@@ -413,7 +434,9 @@ def format_result(result: BrowserDiscoveryResult) -> str:
         f" 상태        : {result.status}",
         f" 세션        : {result.session_state}",
         f" 검색어      : {result.queries}개 (성공 {result.ok_queries} / 실패 {result.failed_queries})",
-        f" 발견 / 수집 : {result.found} / {result.collected}",
+        f" 검색 결과   : result page {result.routes}곳 · 링크 {result.links}개",
+        f" Reel 발견   : {result.found}",
+        f" 수집        : {result.collected}",
         f" 신규 / 중복 : {result.added} / {result.duplicate}",
         f" 추출 품질   : username {result.username_found}/{result.collected}"
         f" · caption {result.caption_found}/{result.collected}"
@@ -424,6 +447,15 @@ def format_result(result: BrowserDiscoveryResult) -> str:
         f"   - Selector : {result.selector_errors}",
         f"   - 기타     : {result.other_errors}",
     ]
+    if result.skips:
+        lines.append(" Skip 사유   :")
+        lines.extend(f"   - {k} = {v}" for k, v in sorted(result.skips.items()))
+    if result.samples:
+        lines.append(" 진단(최대 3건):")
+        lines.extend(
+            "   - " + " ".join(f"{k}={v}" for k, v in sample.items())
+            for sample in result.samples[:3]
+        )
     if result.stop_reason:
         lines.append(f" 중단 사유   : {result.stop_reason}")
     if result.message:

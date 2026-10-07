@@ -53,3 +53,29 @@ def sample_candidate() -> RawCandidate:
         followers=5000,
         language="ko",
     )
+
+
+@pytest.fixture()
+def discovery_config_18a5(config: Config, tmp_path) -> Config:
+    """Browser Discovery를 켠 설정(Phase 18A.5 테스트 공용).
+
+    base_dir은 패키지 루트를 유지한다(profiles/ 를 찾아야 한다). lock·debug는 꺼 둔다.
+    """
+    raw = {
+        **config.raw,
+        "browser_discovery": {
+            "enabled": True,
+            "headless": True,
+            "queries": ["직장인"],
+            "media_types": ["REEL"],
+            "limits": {
+                "max_queries_per_run": 5,
+                "max_candidates_per_query": 20,
+                "max_candidates_per_run": 40,
+                "max_analyze_per_run": 20,
+            },
+            "lock": {"enabled": False},
+            "debug": {"enabled": False},
+        },
+    }
+    return Config(raw=raw, path=config.path, base_dir=config.base_dir)

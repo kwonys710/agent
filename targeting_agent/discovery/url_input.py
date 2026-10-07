@@ -15,8 +15,20 @@ from ..core.exceptions import DiscoveryError
 from ..core.models import RawCandidate
 
 ALLOWED_HOSTS = {"instagram.com", "www.instagram.com", "m.instagram.com"}
-# 지원 path: /reel/<code>/, /reels/<code>/, /p/<code>/, /tv/<code>/
-PATH_RE = re.compile(r"^/(?P<kind>reel|reels|p|tv)/(?P<shortcode>[0-9A-Za-z_-]+)/?$")
+# 지원 path (Phase 18A.5에서 실제 Instagram 화면의 형태를 추가했다):
+#   /reel/<code>/           게시물 직접 링크
+#   /reels/<code>/          구형/대체 형태
+#   /reels/videos/<code>/   Reels 탭 딥링크
+#   /p/<code>/, /tv/<code>/ 일반 게시물·IGTV
+#   /<username>/reel/<code>/  태그·프로필 그리드에서 실제로 쓰이는 형태 ← 이게 빠져 있었다
+# 어느 형태든 canonical은 https://www.instagram.com/reel|p|tv/<code>/ 하나로 모은다.
+PATH_RE = re.compile(
+    r"^/(?:(?P<username>[A-Za-z0-9._]+)/)?"
+    r"(?P<kind>reel|reels|p|tv)/(?:videos/)?"
+    r"(?P<shortcode>[0-9A-Za-z_-]+)/?$"
+)
+# 사용자 이름 자리에 올 수 없는 Instagram 예약 경로(오탐 방지).
+RESERVED_SEGMENTS = {"explore", "reel", "reels", "p", "tv", "stories", "direct", "accounts", "s"}
 
 KIND_TO_MEDIA_TYPE = {"reel": "REEL", "reels": "REEL", "tv": "REEL", "p": "POST"}
 SOURCE_MANUAL_URL = "manual_url"
@@ -30,6 +42,8 @@ class NormalizedUrl:
     canonical_url: str
     shortcode: str
     kind: str
+    # URL 경로에 username이 들어 있던 경우에만 채운다(추측하지 않는다).
+    username: Optional[str] = None
 
     @property
     def media_type(self) -> str:
@@ -64,12 +78,17 @@ def normalize_instagram_url(raw_url: str) -> NormalizedUrl:
 
     kind = match.group("kind")
     shortcode = match.group("shortcode")
+    username = match.group("username")
+    if username and username.lower() in RESERVED_SEGMENTS:
+        raise DiscoveryError(f"지원하지 않는 Instagram 경로입니다: {parsed.path or '/'}")
     # /reels/ 는 /reel/ 로 통일한다(같은 게시물이 두 형태로 중복되지 않도록).
+    # /<username>/reel/<code>/ 도 같은 canonical로 모은다 → 경로 형태가 달라도 중복 판정이 된다.
     canonical_kind = "reel" if kind in ("reel", "reels") else kind
     return NormalizedUrl(
         canonical_url=f"https://www.instagram.com/{canonical_kind}/{shortcode}/",
         shortcode=shortcode,
         kind=kind,
+        username=username or None,
     )
 
 
@@ -89,7 +108,8 @@ def candidate_from_url(
       잘못 적용되지 않게 한다(v0.1 Action Queue 가드와 동일한 규칙).
     """
     normalized = normalize_instagram_url(raw_url)
-    resolved_username = (username or "").strip().lstrip("@")
+    # URL 경로에 username이 들어 있으면(/<username>/reel/<code>/) 보조 정보로 쓴다.
+    resolved_username = (username or normalized.username or "").strip().lstrip("@")
     from .hashtag_discovery import UNRESOLVED_PREFIX  # 동일 규칙 재사용
 
     from .base import extract_hashtags

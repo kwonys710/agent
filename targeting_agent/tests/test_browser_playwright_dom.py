@@ -147,3 +147,31 @@ def test_진단은_구조만_수집하고_민감정보를_담지_않는다(brows
         "has_main",
         "has_dialog",
     }
+
+
+# ===========================================================================
+# Phase 18A.5 — 실기에서 Found 10 → Collected 0 이던 원인 재현
+# ===========================================================================
+def test_실기_그리드_href는_username이_앞에_붙는다(browser: PlaywrightBrowser, dom_server: str):
+    """태그/프로필 그리드의 Reel 링크는 /<username>/reel/<code>/ 형태다.
+
+    이 형태를 Phase 12A 정규화가 거부해서 10건이 조용히 사라졌다(실기 증상).
+    """
+    from targeting_agent.discovery.url_input import normalize_instagram_url
+
+    browser.goto(f"{dom_server}/tag_real.html")
+    links = browser.collect_post_links(20)
+
+    assert links, "그리드에서 링크를 찾아야 한다"
+    # 실제 href 형태를 그대로 확인한다(절대 URL로 변환되어 있어야 한다).
+    assert any("/office_daily_kim/reel/AAA111/" in link for link in links)
+    # 그리고 그 형태가 canonical Reel URL로 정규화된다(Phase 18A.5 수정).
+    # fixture는 127.0.0.1에서 제공되므로, 실기와 같은 조건으로 보려면 경로만 가져다 쓴다.
+    canonical = set()
+    for link in links:
+        path = link.replace(dom_server, "")
+        if "/reel/" not in path and "/reels/" not in path:
+            continue
+        canonical.add(normalize_instagram_url("https://www.instagram.com" + path).canonical_url)
+    assert "https://www.instagram.com/reel/AAA111/" in canonical
+    assert "https://www.instagram.com/reel/DDD444/" in canonical

@@ -178,3 +178,74 @@ run_targeting_discovery.bat --discover-only --query "직장인"
 selector는 공개 UI 관례(aria-label/placeholder/href) 기준으로 맞췄을 뿐,
 개발 환경에서는 로그인 세션이 없어 실제 DOM으로 검증하지 못했다.
 최종 확인은 운영자 PC의 2차 Smoke Test다.
+
+
+---
+
+# Phase 18A.5 — Candidate Collection Pipeline Hotfix
+
+작성일: 2026-10-07 / 계기: Windows 실기 Smoke 2차
+
+## 1. 2차 Smoke 결과 (운영자 실행)
+
+```
+상태 OK / 세션 LOGGED_IN / 검색어 1개
+발견 10 / 수집 0 / 신규 0 / 중복 0 / 오류 0 (selector 0)
+```
+
+검색·세션·selector는 **정상 동작**. 문제는 `Found 10 → Collected 0` 구간이었다.
+
+## 2. 원인 (실제 코드에서 특정)
+
+`Found`는 `collect_post_links()`가 모은 **href 개수**였다. selector는
+`a[href*="/reel/"]`이므로 10건은 모두 reel 링크였는데, `_collect_one()`에서
+전부 버려졌다. 오류가 0이었던 이유는 **drop에 사유가 없었기 때문**이다(silent skip 3곳).
+
+버려진 이유는 URL 형태였다. 태그·프로필 그리드의 Reel 링크는
+
+```
+/office_daily_kim/reel/ABC123/     ← username이 앞에 붙는다
+/reels/videos/ABC123/              ← Reels 탭 딥링크
+```
+
+형태인데, Phase 12A 정규화의 `PATH_RE`는 `/reel/<code>/` 하나만 허용했다.
+→ `DiscoveryError` → 조용히 drop → Found 10 / Collected 0 / 오류 0.
+
+상세 페이지는 **한 번도 열리지 않았다**(그래서 caption/username 문제가 아니었다).
+
+## 3. 수정
+
+| # | 내용 |
+| --- | --- |
+| 1 | `url_input.PATH_RE`에 `/<username>/reel|p|tv/<code>/`와 `/reels/videos/<code>/` 추가. canonical은 여전히 `https://www.instagram.com/reel/<code>/` 하나. **별도 parser를 만들지 않았다**(Phase 12A 재사용 원칙 유지) |
+| 2 | 예약 경로(`explore`, `stories`, `direct`, `accounts` …)는 username으로 보지 않아 `/explore/tags/...`는 계속 거부 |
+| 3 | `POST_LINK_SELECTORS`에 `a[href*="/reels/"]` 추가 |
+| 4 | **silent skip 제거**: 모든 drop에 사유 counter(`skipped_non_reel` / `skipped_invalid_url` / `skipped_duplicate_in_run` / `skipped_detail_unavailable` / `skipped_budget`) |
+| 5 | `links = collected + skip + 상세실패` 가 맞는지 자가 검증(`accounted()`), 틀리면 경고 로그 |
+| 6 | 첫 3건만 구조화 진단(경로/route/수집여부/username/caption/skip) — HTML·쿠키·토큰 없음 |
+| 7 | counter 의미 분리: `result page 수` / `링크 수` / **Reel 발견** / **수집** |
+| 8 | URL 경로의 username을 보조 정보로 사용(상세에서 못 읽을 때만) |
+| 9 | `EMPTY` 상태 추가 — 검색은 정상인데 Reel이 없는 정상 상황을 FAILED로 만들지 않는다 |
+
+schema는 건드리지 않았다(run stats + 로그 수준에서 해결).
+
+## 4. Status 정의 (갱신)
+
+| 상태 | 의미 | exit |
+| --- | --- | --- |
+| `SUCCESS` | Candidate 1건 이상 수집 | 0 |
+| `PARTIAL` | 일부 검색어 실패, 수집은 있음 | 0 |
+| `EMPTY` | 검색·수집 경로 정상, 수집할 Reel 없음 | 0 |
+| `FAILED` | 실행한 검색어 전부 실패 | 1 |
+| `SESSION_STOPPED` | 로그인·Challenge·경고 | 1 |
+
+## 5. 검증
+
+- 실제 Chromium + 실기 형태 fixture(`tag_real.html`)로 `/<username>/reel/<code>/` 재현 → 수정 확인
+- 링크 10건(Reel 3건) → 수집 3건, skip 사유 7건이 모두 설명됨
+- caption 없음 → `NEEDS_ENRICHMENT`로 저장(수집 0이 되지 않는다)
+- username 없음 → URL 경로 username → 없으면 `unresolved:` 최소 저장
+- 오프라인 리허설(검색어 3개 × 후보 3개): 링크 9 → Reel 7 → 수집 7,
+  username 86% · caption 86%, Claude 0, Instagram 쓰기 0
+
+실기 재실행은 운영자 PC에서만 가능하다(`BLOCKED.md`).

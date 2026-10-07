@@ -68,15 +68,31 @@ class PostDetail:
         return bool(self.caption.strip() or self.hashtags)
 
 
+# skip 사유(Phase 18A.5). 모든 drop은 반드시 이 중 하나로 집계된다 — silent skip 금지.
+SKIP_NON_REEL = "skipped_non_reel"
+SKIP_INVALID_URL = "skipped_invalid_url"
+SKIP_DUPLICATE_IN_RUN = "skipped_duplicate_in_run"
+SKIP_DETAIL_UNAVAILABLE = "skipped_detail_unavailable"
+SKIP_BUDGET = "skipped_budget"
+SKIP_OTHER = "skipped_other"
+
+
 @dataclass
 class QueryResult:
     """검색어 1건의 처리 결과."""
 
     query: str
-    found: int = 0
-    collected: int = 0
+    routes: int = 0          # 검색 결과에서 열어 본 result route 수(해시태그/계정 페이지)
+    links: int = 0           # 결과 페이지에서 본 링크 수(reel 여부 판정 전)
+    found: int = 0           # 실제 /reel/ 로 인정된 permalink 수
+    collected: int = 0       # Ingestion으로 넘긴 Candidate 수
     errors: list[str] = field(default_factory=list)
     failed_stage: Optional[str] = None
+    skips: dict[str, int] = field(default_factory=dict)
+    samples: list[dict[str, str]] = field(default_factory=list)
+
+    def skip(self, reason: str) -> None:
+        self.skips[reason] = self.skips.get(reason, 0) + 1
 
     @property
     def ok(self) -> bool:
@@ -102,12 +118,30 @@ class DiscoveryStats:
     username_found: int = 0
     caption_found: int = 0
     detail_failed: int = 0
+    # Phase 18A.5: 어디서 몇 건이 빠졌는지
+    routes: int = 0
+    links: int = 0
+    skips: dict[str, int] = field(default_factory=dict)
+    samples: list[dict[str, str]] = field(default_factory=list)
 
     def add_query(self, result: QueryResult) -> None:
         self.queries.append(result)
+        self.routes += result.routes
+        self.links += result.links
         self.found += result.found
         self.collected += result.collected
         self.selector_errors += len(result.errors)
+        for reason, count in result.skips.items():
+            self.skips[reason] = self.skips.get(reason, 0) + count
+        self.samples.extend(result.samples)
+
+    @property
+    def skipped_total(self) -> int:
+        return sum(self.skips.values())
+
+    def accounted(self) -> bool:
+        """발견한 링크가 수집/skip/오류 중 하나로 모두 설명되는지(silent skip 감지)."""
+        return self.links == self.collected + self.skipped_total + self.detail_failed
 
     def note_extraction(self, *, username: bool, caption: bool) -> None:
         self.username_found += 1 if username else 0

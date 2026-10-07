@@ -33,6 +33,11 @@ from ..core.models import RawCandidate
 from .base import DiscoverySource, extract_hashtags
 from .browser_diagnostics import log_diagnostics
 from .browser_models import (
+    SKIP_DETAIL_UNAVAILABLE,
+    SKIP_DUPLICATE_IN_RUN,
+    SKIP_INVALID_URL,
+    SKIP_BUDGET,
+    SKIP_NON_REEL,
     SOURCE_BROWSER_SEARCH,
     DiscoveryStats,
     PostDetail,
@@ -408,11 +413,13 @@ class InstagramBrowserDiscovery(DiscoverySource):
             result = QueryResult(query=query)
             try:
                 self.browser.search(query)
+                result.routes = 1  # 검색 결과에서 공개 result page 1곳만 연다(깊이 1단계)
                 links = self.browser.collect_post_links(self.max_candidates_per_query)
-                result.found = len(links)
+                result.links = len(links)
                 for link in links:
                     if len(candidates) >= budget:
-                        break
+                        result.skip(SKIP_BUDGET)
+                        continue
                     candidate = self._collect_one(link, query, seen, result)
                     if candidate is not None:
                         candidates.append(candidate)
@@ -429,14 +436,36 @@ class InstagramBrowserDiscovery(DiscoverySource):
             self.stats.add_query(result)
 
         logger.info(
-            "Browser Discovery: 검색어 %d개(성공 %d / 실패 %d) · 발견 %d · 수집 %d",
+            "Browser Discovery: 검색어 %d개(성공 %d / 실패 %d) · route %d · 링크 %d · "
+            "Reel %d · 수집 %d · skip %s",
             len(self.stats.queries),
             self.stats.ok_queries,
             self.stats.failed_queries,
+            self.stats.routes,
+            self.stats.links,
             self.stats.found,
             self.stats.collected,
+            ", ".join(f"{k}={v}" for k, v in sorted(self.stats.skips.items())) or "없음",
         )
+        if not self.stats.accounted():
+            # 설명되지 않은 drop이 있으면 조용히 넘기지 않는다.
+            logger.warning(
+                "집계 불일치: 링크 %d ≠ 수집 %d + skip %d + 상세실패 %d",
+                self.stats.links,
+                self.stats.collected,
+                self.stats.skipped_total,
+                self.stats.detail_failed,
+            )
         return candidates
+
+    @staticmethod
+    def _sample(result: QueryResult, link: str, **fields: str) -> None:
+        """앞의 3건만 구조화해 남긴다(제한된 진단 — HTML/쿠키/토큰 없음)."""
+        if len(result.samples) >= 3:
+            return
+        path = link.split("instagram.com", 1)[-1] if "instagram.com" in link else link
+        route = "reel" if "/reel/" in path else ("post" if "/p/" in path else "other")
+        result.samples.append({"path": path[:80], "route": route, **fields})
 
     @staticmethod
     def _record_failure(
@@ -456,19 +485,28 @@ class InstagramBrowserDiscovery(DiscoverySource):
     def _collect_one(
         self, link: str, query: str, seen: set[str], result: QueryResult
     ) -> Optional[RawCandidate]:
+        """링크 1건을 후보로 만든다. **모든 drop은 사유를 남긴다**(silent skip 금지)."""
         try:
             normalized = normalize_instagram_url(link)
-        except DiscoveryError:
+        except DiscoveryError as exc:
+            result.skip(SKIP_INVALID_URL)
+            self._sample(result, link, skip=SKIP_INVALID_URL, detail=str(exc)[:60])
             return None
         if normalized.media_type not in self.media_types:
+            result.skip(SKIP_NON_REEL)
+            self._sample(result, link, skip=SKIP_NON_REEL, media_type=normalized.media_type)
             return None
+        result.found += 1  # 여기까지 온 것만 '실제 Reel permalink'로 센다
         if normalized.canonical_url in seen:
+            result.skip(SKIP_DUPLICATE_IN_RUN)
+            self._sample(result, link, skip=SKIP_DUPLICATE_IN_RUN)
             return None
         seen.add(normalized.canonical_url)
 
         detail = self.browser.open_post(normalized.canonical_url)
         if detail is None:
             self.stats.detail_failed += 1
+            self._sample(result, link, skip=SKIP_DETAIL_UNAVAILABLE)
             # 상세를 읽지 못한 건은 후보로 만들지 않는다(검색어 전체를 실패시키지도 않는다).
             message = (
                 f"stage={SelectorStage.POST_DETAIL.value} "
@@ -483,7 +521,8 @@ class InstagramBrowserDiscovery(DiscoverySource):
         # URL 정규화와 후보 생성은 Phase 12A 구현을 그대로 쓴다.
         candidate = candidate_from_url(
             normalized.canonical_url,
-            username=detail.username or None,
+            # 상세에서 못 읽었으면 URL 경로의 username을 쓴다(둘 다 없으면 unresolved).
+            username=detail.username or normalized.username or None,
             caption=detail.caption,
             note=f"browser search: {query}",
             source=SOURCE_BROWSER_SEARCH,
@@ -491,6 +530,13 @@ class InstagramBrowserDiscovery(DiscoverySource):
         candidate.like_count = detail.like_count
         candidate.comment_count = detail.comment_count
         candidate.extra["source_query"] = query
+        self._sample(
+            result,
+            link,
+            collected="yes",
+            username="yes" if candidate.username and not candidate.username.startswith("unresolved:") else "no",
+            caption="yes" if detail.caption.strip() else "no",
+        )
         self.stats.note_extraction(
             username=bool(detail.username), caption=bool(detail.caption.strip())
         )
