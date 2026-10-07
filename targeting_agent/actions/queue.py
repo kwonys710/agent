@@ -16,6 +16,7 @@ from ..core.config import Config
 from ..core.database import enqueue_action, update_candidate_status
 from ..core.logger import get_logger
 from ..core.models import ActionType, MediaStatus
+from .policy import ActionPolicy
 
 logger = get_logger("actions.queue")
 
@@ -40,11 +41,13 @@ class ActionQueueBuilder:
     def __init__(self, config: Config, run_id: str) -> None:
         self.config = config
         self.run_id = run_id
-        self.enable_like = bool(config.get("actions.enable_like", True))
-        self.enable_comment = bool(config.get("actions.enable_comment", True))
-        self.like_threshold = float(config.get("actions.require_score_for_like", 75))
-        self.comment_threshold = float(config.get("actions.require_score_for_comment", 82))
-        self.minimum_score = float(config.get("scoring.minimum_target_score", 70))
+        # 임계값 판단은 Action Policy 한 곳에서만 한다(Phase 18B.1).
+        self.policy = ActionPolicy.from_config(config)
+        self.enable_like = self.policy.enable_like
+        self.enable_comment = self.policy.enable_comment
+        self.like_threshold = self.policy.like_threshold
+        self.comment_threshold = self.policy.comment_threshold
+        self.minimum_score = self.policy.minimum_score
         self.executor = config.executor_mode
         self.dry_run = config.dry_run
         self.skip_unresolved_creator = bool(config.get("safety.skip_unresolved_creator", True))
@@ -98,7 +101,9 @@ class ActionQueueBuilder:
 
         queued_any = False
 
-        if self.enable_like and target_score >= self.like_threshold:
+        recommended = self.policy.recommend(target_score)
+
+        if ActionType.LIKE in recommended:
             action_id = enqueue_action(
                 conn,
                 run_id=self.run_id,
@@ -119,7 +124,7 @@ class ActionQueueBuilder:
         elif self.enable_like:
             result._note("below_like_threshold")
 
-        if self.enable_comment and target_score >= self.comment_threshold:
+        if ActionType.COMMENT in recommended:
             if comment_text:
                 action_id = enqueue_action(
                     conn,

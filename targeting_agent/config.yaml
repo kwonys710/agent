@@ -188,6 +188,24 @@ learning:
     minimum_band_samples: 5     # Score 구간 추천에 필요한 최소 표본
   min_keyword_score: 2.0        # 키워드 신호 강도 임계값
 
+autopilot:
+  # Phase 18C — Discovery → 분석 → Action 결정 → Executor 까지 한 번에 돌리는 운용 모드.
+  # enabled=false 면 REVIEW 모드: Action은 만들어지되 **운영자 승인 없이는 실행되지 않는다.**
+  # enabled=true 면 AUTOPILOT 모드: Policy 기준을 만족한 Action을 자동 승인한다.
+  # 기본값을 false로 둔다 — 실제 공개 댓글/좋아요는 운영자가 켜는 순간부터 시작된다.
+  enabled: false
+  discovery: true            # Autopilot 실행 시 Browser Discovery도 함께 수행
+  process_inbox: true
+  max_candidates_per_run: 10
+  max_approvals_per_run: 10
+  execute_actions: true      # Executor 단계 실행(browser_executor.mode가 최종 안전장치)
+  lock:
+    enabled: true
+    path: "data/.autopilot.lock"
+    stale_minutes: 60
+  summary:
+    enabled: true
+
 browser_executor:
   # Phase 18B — 운영자가 로그인한 브라우저로 LIKE / COMMENT만 수행한다.
   # FOLLOW / DM / 저장 / 공유는 구현하지 않는다.

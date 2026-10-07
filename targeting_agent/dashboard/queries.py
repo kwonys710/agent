@@ -260,8 +260,11 @@ def default_action_selection(detail: Mapping[str, Any], config: Any) -> ActionDe
 
     임계값은 **추천 기준**이다. 미달이어도 사용자가 직접 체크할 수 있다(차단하지 않는다).
     """
-    like_threshold = float(config.get("actions.require_score_for_like", 75))
-    comment_threshold = float(config.get("actions.require_score_for_comment", 82))
+    from ..actions.policy import ActionPolicy
+
+    policy = ActionPolicy.from_config(config)
+    like_threshold = policy.like_threshold
+    comment_threshold = policy.comment_threshold
     score = detail.get("target_score")
     score_value = float(score) if score is not None else 0.0
     score_text = "-" if score is None else f"{score_value:.0f}"
@@ -287,8 +290,12 @@ def default_action_selection(detail: Mapping[str, Any], config: Any) -> ActionDe
             source="skipped",
         )
 
-    like_ok = score is not None and score_value >= like_threshold
-    comment_ok = score is not None and score_value >= comment_threshold
+    # 추천 판단도 Action Policy를 그대로 쓴다(임계값을 Dashboard에 중복 정의하지 않는다).
+    recommended = policy.recommend(
+        score_value if score is not None else None, apply_minimum=False
+    )
+    like_ok = ActionType.LIKE in recommended
+    comment_ok = ActionType.COMMENT in recommended
     parts = [
         f"현재 Score {score_text}",
         f"LIKE 추천 기준 {like_threshold:.0f} {'충족' if like_ok else '미달'}",
