@@ -97,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scheduled Run(배치): inbox 처리 → 신규 후보 분석 → Daily Summary 생성",
     )
     parser.add_argument(
+        "--weekly-report",
+        action="store_true",
+        help="최근 7일 운영 품질 보고서를 생성한다(DB 기준, LLM 호출 없음)",
+    )
+    parser.add_argument(
         "--autopilot",
         action="store_true",
         help="Autopilot: Discovery → 분석 → Action 결정 → 실행(기본 DRY_RUN)까지 한 번에",
@@ -457,6 +462,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.import_only:
         return run_import_only(config, args)
+
+    if args.weekly_report:
+        from .learning.weekly_report import (
+            build_weekly_report,
+            render_weekly_html,
+            write_weekly_report,
+        )
+
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            report = build_weekly_report(conn, config)
+            path = write_weekly_report(config, report, render_weekly_html(report))
+            print(f"Weekly Report 생성: {path}")
+            for note in report.notes:
+                print(f"  [경고] {note}")
+            for item in report.recommendations:
+                print(f"  [추천] {item}")
+            return 0
+        finally:
+            conn.close()
 
     if args.autopilot:
         from .autopilot.runner import format_result as format_autopilot

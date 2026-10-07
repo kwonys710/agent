@@ -42,6 +42,12 @@ FEEDBACK_BUTTONS = (
 )
 
 STYLE = """
+.statusbar{background:#fff;border:1px solid #e3e3e3;border-radius:8px;padding:10px 12px;margin:10px 0}
+.statushead{font-size:13px;font-weight:600;margin-bottom:6px}
+.statusgrid{display:flex;flex-wrap:wrap;gap:8px 18px}
+.statusitem{font-size:12px;color:#555} .statusitem b{display:block;color:#1b1b1b;font-size:13px}
+.badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;background:#eef;color:#334;margin-left:6px}
+.badge.live{background:#fde7e7;color:#a11}
 body{font-family:system-ui,"Malgun Gothic",sans-serif;margin:0;padding:20px 24px;color:#1b1b1b;background:#fafafa}
 h1{font-size:19px;margin:0 0 4px} h2{font-size:15px;margin:22px 0 8px}
 a{color:#0b5fff} .muted{color:#666;font-size:12px}
@@ -123,6 +129,36 @@ def _summary(conn: sqlite3.Connection, config: Config) -> str:
     ]
     tiles = "".join(f'<div class="stat">{e(k)}<b>{e(v)}</b></div>' for k, v in cells)
     return f'<div class="grid">{tiles}</div><p class="muted">기준일 {e(s["date"])} · 저장된 분석 결과만 표시합니다(Claude를 호출하지 않음).</p>'
+
+
+def _status_bar(conn: sqlite3.Connection, config: Config) -> str:
+    """운영 상태 한 줄(Phase 18C.1). 화면을 재설계하지 않고 상태만 덧붙인다."""
+    status = queries.operational_status(conn, config)
+    live = status["executor_mode"] == "LIVE" and not status["dry_run"]
+    badge_class = "badge live" if live else "badge"
+    items = [
+        ("운용 모드", status["mode_label"]),
+        ("Executor", f'{status["executor_mode"]} — {status["executor_label"]}'),
+        ("Discovery", "사용" if status["discovery_enabled"] else "사용 안 함"),
+        ("AI", status["ai_provider"]),
+        ("오늘 사용량", status["usage"]),
+        ("승인 대기", f'{status["awaiting_approval"]}건'),
+        ("최근 Discovery", status["discovery_last"]),
+        ("최근 Autopilot", status["autopilot_last"]),
+    ]
+    rows = "".join(
+        f'<div class="statusitem"><span>{e(label)}</span><b>{e(value)}</b></div>'
+        for label, value in items
+    )
+    warn = (
+        '<span class="badge live">실제 수행 LIVE</span>'
+        if live
+        else '<span class="badge">실제 동작 없음</span>'
+    )
+    return (
+        f'<div class="statusbar"><div class="statushead">운영 상태 {warn}</div>'
+        f'<div class="statusgrid">{rows}</div></div>'
+    )
 
 
 def _add_form(token: str) -> str:
@@ -417,7 +453,8 @@ def render(conn: sqlite3.Connection, config: Config, page: Page, token: str) -> 
         f"<style>{STYLE}</style></head><body>"
         "<h1>DailyReels Targeting Agent</h1>"
         '<p class="muted">운영 화면 — Instagram 동작을 실행하지 않고 Action Queue와 Feedback만 관리합니다.</p>'
-        f"{_tabs(page.tab)}{notice}{_summary(conn, config)}{body}</body></html>"
+        f"{_tabs(page.tab)}{notice}{_status_bar(conn, config)}"
+        f"{_summary(conn, config)}{body}</body></html>"
     )
 
 

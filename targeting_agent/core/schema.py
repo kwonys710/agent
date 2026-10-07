@@ -8,6 +8,9 @@
 - comment_drafts(media_pk, normalized_text) UNIQUE (동일 댓글 중복 저장 차단)
 - candidate_media.canonical_url UNIQUE (URL 입력 시 동일 게시물 중복 차단)
 
+v11(Phase 18C.1): action_queue.approved_by — 운영자 승인과 Autopilot 자동 승인을 구분한다.
+학습 신호는 사람의 승인만 사용한다(자기 강화 방지).
+
 v10(Phase 18C): autopilot_runs — Autopilot 실행 이력.
 
 v9(Phase 18A.3): browser_discovery_runs에 추출 품질 컬럼(username_found/caption_found/detail_failed).
@@ -30,7 +33,7 @@ import_events 테이블 추가. 기존 DB는 core/database.py의 마이그레이
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -150,6 +153,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         result TEXT,
         error TEXT,
         approved_at TEXT,
+        approved_by TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (media_pk, action_type)

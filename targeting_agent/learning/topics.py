@@ -139,9 +139,12 @@ def collect_signals(
     for row in feedback_rows:
         add(int(row["media_pk"]), str(row["feedback_type"]))
 
-    # 운영자가 승인한 Action = 중간 강도의 positive
+    # 운영자가 승인한 Action = 중간 강도의 positive.
+    # Autopilot이 스스로 승인한 Action은 사람의 판단이 아니므로 신호로 쓰지 않는다
+    # (자기 강화 방지 — approved_by가 NULL이면 기존 운영자 승인으로 본다).
     for row in conn.execute(
-        "SELECT DISTINCT media_pk FROM action_queue WHERE approved_at IS NOT NULL"
+        "SELECT DISTINCT media_pk FROM action_queue "
+        "WHERE approved_at IS NOT NULL AND COALESCE(approved_by, 'operator') = 'operator'"
     ):
         add(int(row["media_pk"]), "APPROVED")
 

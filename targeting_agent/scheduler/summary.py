@@ -25,6 +25,7 @@ LATEST_NAME = "latest.html"
 STYLE = """
 body{font-family:system-ui,"Malgun Gothic",sans-serif;margin:0;padding:24px;color:#1b1b1b;background:#fafafa}
 h1{font-size:20px;margin:0 0 2px} h2{font-size:14px;margin:22px 0 8px;color:#333}
+h3{font-size:13px;margin:14px 0 4px;color:#444}
 .muted{color:#666;font-size:12px}
 .grid{display:flex;flex-wrap:wrap;gap:10px}
 .stat{background:#fff;border:1px solid #e3e3e3;border-radius:8px;padding:8px 12px;min-width:112px}
@@ -51,6 +52,9 @@ class SummaryData:
     inbox: dict[str, Any] = field(default_factory=dict)
     run: dict[str, Any] = field(default_factory=dict)
     learning: dict[str, Any] = field(default_factory=dict)
+    # Phase 18C.1: 운영 품질(Discovery/추출/Executor/Autopilot)
+    operations: dict[str, dict[str, str]] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
 
 
 def _local_date(column: str, tz_offset: int) -> str:
@@ -146,8 +150,14 @@ def build_summary_data(
         "최근 변경": " / ".join(overview["changes"][:5]) or "변경 없음",
     }
 
+    from ..learning.operations import collect_operations_report
+
+    report = collect_operations_report(conn, config)
+
     return SummaryData(
         date=date,
+        operations=report.as_sections(),
+        notes=report.notes,
         learning=learning,
         candidate=candidate,
         ai=ai,
@@ -174,6 +184,12 @@ def render_summary_html(data: SummaryData) -> str:
             f"<tr><th>{_e(key)}</th><td>{_e(value)}</td></tr>" for key, value in mapping.items()
         )
         return f"<table>{body}</table>"
+
+    def notes_html(notes: list[str]) -> str:
+        if not notes:
+            return '<p class="muted">특별한 경고 없음</p>'
+        items = "".join(f"<li>{_e(note)}</li>" for note in notes)
+        return f"<ul>{items}</ul>"
 
     score_items = [(key.replace("above_", "Score >= "), value) for key, value in data.score.items()]
     inbox = data.inbox or {}
@@ -226,6 +242,11 @@ def render_summary_html(data: SummaryData) -> str:
 <h2>Learning</h2>
 {rows(data.learning)}
 <p class="muted">학습은 자동 실행되지 않는다. 필요할 때 --learn 으로 확인한 뒤 --learn-apply 로 적용한다.</p>
+
+<h2>운영 품질 (Phase 18C.1)</h2>
+{"".join(f"<h3>{_e(title)}</h3>{rows(section)}" for title, section in (data.operations or {}).items())}
+{notes_html(data.notes)}
+<p class="muted">품질 분석은 추천까지만 한다. LIKE/COMMENT 임계값을 자동으로 바꾸지 않는다.</p>
 
 <h2>이번 실행</h2>
 {rows(run)}

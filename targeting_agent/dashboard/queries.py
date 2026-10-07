@@ -75,6 +75,62 @@ def daily_summary(conn: sqlite3.Connection, tz_offset: int = 9) -> dict[str, Any
     }
 
 
+def operational_status(conn: sqlite3.Connection, config: Any) -> dict[str, Any]:
+    """상단 운영 상태(Phase 18C.1).
+
+    Discovery / Claude / Executor / Autopilot / 마지막 실행만 보여 준다.
+    기존 화면을 재설계하지 않고 한 줄 상태만 덧붙이기 위한 최소 조회다.
+    """
+    from ..actions.policy import RunMode, usage_note
+
+    mode = RunMode.from_config(config)
+    executor_mode = str(config.get("browser_executor.mode", "DRY_RUN")).upper()
+    discovery_enabled = bool(config.get("browser_discovery.enabled", False))
+
+    def last(table: str, columns: str) -> Optional[sqlite3.Row]:
+        try:
+            return conn.execute(
+                f"SELECT {columns} FROM {table} ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+        except sqlite3.Error:  # pragma: no cover - 테이블이 아직 없는 경우
+            return None
+
+    discovery_row = last("browser_discovery_runs", "status, started_at, added, found")
+    autopilot_row = last("autopilot_runs", "status, mode, started_at, real_writes")
+
+    return {
+        "mode": mode.value,
+        "mode_label": "운영자 승인(REVIEW)" if mode is RunMode.REVIEW else "자동 승인(AUTOPILOT)",
+        "executor_mode": executor_mode,
+        "executor_label": {
+            "DISABLED": "실행 안 함",
+            "DRY_RUN": "실제 동작 없음(Dry Run)",
+            "LIVE": "실제 좋아요/댓글 수행",
+        }.get(executor_mode, executor_mode),
+        "dry_run": bool(config.dry_run),
+        "discovery_enabled": discovery_enabled,
+        "discovery_last": (
+            f"{discovery_row['status']} · 신규 {discovery_row['added']} ({discovery_row['started_at'][:16]})"
+            if discovery_row
+            else "실행 기록 없음"
+        ),
+        "autopilot_last": (
+            f"{autopilot_row['status']} · {autopilot_row['mode']} · 실제 쓰기 "
+            f"{autopilot_row['real_writes']} ({autopilot_row['started_at'][:16]})"
+            if autopilot_row
+            else "실행 기록 없음"
+        ),
+        "ai_provider": str(config.get("ai.provider", "heuristic")),
+        "usage": usage_note(config, conn),
+        "awaiting_approval": int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM action_queue "
+                "WHERE status = 'PENDING' AND approved_at IS NULL"
+            ).fetchone()["n"]
+        ),
+    }
+
+
 def daily_action_usage(
     conn: sqlite3.Connection, tz_offset: int = 9, dry_run: bool = True
 ) -> dict[str, int]:

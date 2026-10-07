@@ -22,7 +22,7 @@ from enum import Enum
 from typing import Optional, Sequence
 
 from ..core.config import Config
-from ..core.database import approve_action
+from ..core.database import APPROVED_BY_AUTOPILOT, approve_action
 from ..core.logger import get_logger
 from ..core.models import ActionType
 
@@ -170,7 +170,7 @@ def auto_approve(
             result.note("no_comment_text")
             continue
 
-        if approve_action(conn, int(row["action_id"])):
+        if approve_action(conn, int(row["action_id"]), by=APPROVED_BY_AUTOPILOT):
             result.approved += 1
             result.approved_ids.append(int(row["action_id"]))
         else:

@@ -1,6 +1,6 @@
 # Targeting Agent 작업 상태
 
-Current Phase: 18A.1 완료 (Browser Discovery selector/진단 Hotfix — 실기 2차 Smoke 대기)
+Current Phase: 18C.1 완료 (Autopilot + 품질 모니터링 — 실기 Instagram Smoke만 대기)
 
 Completed:
 - Phase 1: 구조 / config.yaml / .env.example / SQLite / Logging
@@ -167,12 +167,53 @@ Phase 18A.1 완료: Instagram DOM / Selector Compatibility Hotfix
 - 테스트 18개 추가(FakeDOM으로 실제 selector registry 검증) — 총 52개, 전체 348 passed
 - 미검증: 실제 Instagram DOM(개발 환경에 로그인 세션 없음) → 운영자 2차 Smoke로 확인
 
+Phase 18A.2~18A.4 완료: Discovery 진단 · 추출 품질 · 파이프라인 연결
+- browser_diagnostics.py: 제한된 DOM 진단(URL/title/textbox 접근성 속성/nav href/
+  reel 수/main·dialog) JSON 1줄. HTML·쿠키·토큰·localStorage 수집 안 함.
+- selector 실패 시 stage별 스크린샷 + 진단 자동 기록
+- 추출 품질 계측(username/caption/detail_failed) + schema v9 컬럼
+- tests/fixtures/instagram_dom + 실제 Playwright·Chromium selector 검증(로컬 127.0.0.1)
+- Discovery → Ingestion → CandidateProcessor → Score → 댓글 → Dashboard E2E 테스트
+
+Phase 18B 완료: Browser Action Executor (LIKE / COMMENT)
+- action_selectors.py(쓰기 selector 분리) / browser_page.py(PlaywrightActionPage) /
+  browser.py(BrowserExecutor: DISABLED·DRY_RUN·LIVE)
+- 기존 Action Queue / RateLimiter / Approval Gate / Interaction 재사용(두 번째 Queue 없음)
+- FOLLOW/DM/SAVE/SHARE 기능 자체 없음, 재시도 없음, 댓글은 기존 후보만 사용
+- 중단: 로그인 필요 / Challenge / 경고 / 작업 차단 → Run 전체 halt
+- core/database.approve_action() 추가(승인 지점 단일화)
+
+Phase 18B.1 완료: Action Policy / REVIEW·AUTOPILOT
+- actions/policy.py: 점수 → 추천 Action(기존 config 임계값 재사용), RunMode, auto_approve
+- Queue 생성·Dashboard 기본 체크·자동 승인이 같은 규칙을 쓴다
+- AUTOPILOT에서도 creator 미확인·댓글 없음·승인 상한을 지킨다
+
+Phase 18C 완료: Autopilot Orchestration
+- autopilot/runner.py: lock → Discovery → inbox → 분석 → Queue → 승인 → 실행 → 리포트
+- CLI --autopilot, run_targeting_autopilot.bat, schema v10 autopilot_runs
+- scheduler.autopilot=true면 Scheduled Run이 Autopilot 실행(기본 false)
+- 실제 쓰기(dry_run=0 Interaction) 건수를 따로 집계
+
+Phase 18C.1 완료: 운영 품질 모니터링
+- learning/operations.py: Discovery/추출/Executor/Autopilot 지표 + 경고(DB만 읽음)
+- learning/weekly_report.py + CLI --weekly-report: 결정론적 주간 보고서(LLM 호출 0)
+- Daily Summary에 운영 품질 섹션, Dashboard 상단에 운영 상태 한 줄(REVIEW/AUTOPILOT 표시)
+- Implicit Feedback 분리: 운영자 승인=학습 신호 / **Autopilot 자동 승인=신호 아님**
+  (schema v11 action_queue.approved_by — 자기 강화 방지) / Action 실패=실행 건강 지표
+- 임계값·Profile 자동 변경 없음(추천까지만)
+
+최종 안전 상태: autopilot.enabled=false · browser_executor.mode=DRY_RUN ·
+actions.execution.dry_run=true · scheduler.autopilot=false · browser_discovery.enabled=false
+개발 중 실제 Instagram 쓰기 0건.
+
 Next: 운영 관찰 / v0.3 검토
 Meta API: Optional (진행을 막지 않음)
 
 Pending:
-- Phase 18A.1 2차 Smoke(운영자 PC): run_targeting_discovery.bat --discover-only --query "직장인"
-  실패 시 stage + selector key + 스크린샷만 보고(추측 반복 실행 금지)
+- 실제 Instagram Smoke(운영자 PC) — BLOCKED.md 참고. 개발 환경은 Instagram 접근 차단 + 로그인 세션 없음.
+  1) run_targeting_discovery.bat --discover-only --query "직장인"
+  2) 실패 시 stage + selector key + data/browser_debug 스크린샷만 보고(추측 반복 실행 금지)
+- LIVE 전환은 운영자 판단(browser_executor.mode / autopilot.enabled)
 - 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)
 - Gemini 분석/댓글 생성 실사용 검증(API Key 필요)
 - 운영 데이터 축적 후 학습 임계값(min_keyword_media 등) 재조정

@@ -137,6 +137,27 @@ run_targeting_discovery.bat --discover-only  REM 수집·저장까지만(Claude 
 - 단일 검색어 확인: `run_targeting_discovery.bat --discover-only --query "직장인"`
 - 자세한 내용은 `docs/phase18a_browser_discovery.md` 참고.
 
+### 3-4. Autopilot (Phase 18C)
+
+```bat
+run_targeting_autopilot.bat          REM Discovery → 분석 → Action 결정 → 실행(기본 DRY_RUN)
+run_targeting.bat --weekly-report    REM 최근 7일 운영 품질 보고서(LLM 호출 없음)
+```
+
+기본값은 **REVIEW 모드 + DRY_RUN**이다. 즉 Action은 만들어지지만
+운영자 승인 없이는 실행되지 않고, 실행되더라도 실제 좋아요/댓글은 수행하지 않는다.
+
+| 설정 | 기본값 | 의미 |
+| --- | --- | --- |
+| `autopilot.enabled` | `false` | REVIEW — 운영자가 Dashboard에서 승인 |
+| `browser_executor.mode` | `DRY_RUN` | 실제 좋아요/댓글 없음 (`DISABLED`/`LIVE` 선택 가능) |
+| `actions.execution.dry_run` | `true` | 켜져 있으면 `LIVE`여도 실제 동작 없음(강한 가드) |
+| `scheduler.autopilot` | `false` | true면 Scheduled Run이 Autopilot을 실행 |
+
+Executor가 수행하는 Action은 **LIKE / COMMENT 두 가지뿐**이며, FOLLOW·DM·저장·공유는
+기능 자체가 없다. 로그인 필요 / Challenge / 경고 / 작업 차단이 감지되면 Action Run 전체를
+즉시 중단하고 재시도하지 않는다. 자세한 내용은 `docs/phase18bc_autopilot.md` 참고.
+
 > 로그인 상태의 자동 수집은 Instagram 이용약관의 자동화 수집 조항에 저촉될 수 있고,
 > 계정 제재 위험은 운영자 계정이 진다. 사용 여부는 운영자가 판단한다.
 
@@ -476,6 +497,10 @@ Feedback / 승인 / Skip → topic별 신호 → 변화량 제한 → 새 Profil
 - Phase 18A의 브라우저는 **읽기 전용 Discovery 전용**이다. Action 실행에는 쓰지 않는다
   (BrowserExecutor 미구현 결정은 그대로 유효하다).
 - Instagram 자격증명은 소스/설정/DB/로그 어디에도 저장하지 않는다. 로그인은 사람이 직접 한다.
+- Phase 18B Executor는 LIKE / COMMENT만 수행한다. 기본값은 DRY_RUN이며, 실제 수행은
+  운영자가 `browser_executor.mode`를 LIVE로 바꿀 때만 시작된다.
+- Autopilot의 자동 승인은 학습 신호로 쓰지 않는다(Agent가 자기 결정으로 학습하지 않는다).
+- 품질 분석은 추천까지만 한다. LIKE/COMMENT 임계값을 Agent가 자동으로 바꾸지 않는다.
 
 ## 15. 테스트
 
@@ -491,7 +516,10 @@ python -m pytest targeting_agent/tests -q
 | 구현 완료 | AI Intelligence = Claude Code CLI(캐시·한도·fallback 포함) |
 | 구현 완료(조건부) | HashtagDiscovery — 공식 API 토큰/권한 필요, Creator 미확인 제약 있음 |
 | 구현 완료(기본 OFF) | Instagram Browser Discovery(Phase 18A) — 읽기 전용 검색 수집, `--discover` |
+| 구현 완료(기본 DRY_RUN) | Browser Action Executor(Phase 18B) — LIKE/COMMENT, LIVE 코드 포함 |
+| 구현 완료(기본 REVIEW) | Autopilot Orchestration(Phase 18C) — `--autopilot` |
+| 구현 완료 | 운영 품질 모니터링 / Weekly Report(Phase 18C.1) — `--weekly-report` |
 | 미지원 확인 | OfficialAPIExecutor 쓰기(공식 API에 해당 기능 없음) |
-| 구현 안 함(결정) | BrowserExecutor — Phase 9 검토 결과 미구현, `docs/phase9_browser_executor.md` 참고 |
+| 재검토 후 구현 | BrowserExecutor — Phase 9에서는 보류, Phase 18B에서 "운영자 직접 로그인 + LIKE/COMMENT 한정 + 기본 DRY_RUN" 조건으로 구현 |
 
 자세한 진행 상태는 `WORK_STATE.md` 참고.
