@@ -178,6 +178,110 @@ def collect_audit(conn: sqlite3.Connection) -> AuditReport:
         )
         report.traces.append(trace)
 
+    _check_issues(report)
+    return report
+
+
+# --- 후보부터 실행까지 한 줄로 잇기 (Phase 18D.6) ----------------------------
+_CHAIN_SQL = """
+SELECT
+    q.action_id, q.action_type, q.status, q.approved_by, q.comment_text,
+    m.media_pk, m.media_id, m.canonical_url, m.permalink, m.target_score,
+    (SELECT COUNT(*) FROM media_analysis a WHERE a.media_pk = m.media_pk
+        AND a.target_score IS NOT NULL)                                   AS analyses,
+    (SELECT COUNT(*) FROM comment_drafts d WHERE d.media_pk = m.media_pk
+        AND d.quality_ok = 1)                                             AS passed_drafts,
+    (SELECT COUNT(*) FROM interactions i WHERE i.action_id = q.action_id) AS interactions
+FROM action_queue q
+LEFT JOIN candidate_media m ON m.media_pk = q.media_pk
+{where}
+ORDER BY q.action_id
+"""
+
+# run_id는 **Action을 만든 Run**이다. 어떤 Run이 실행한 Action은 그보다 앞선
+# Run에서 만들어졌을 수 있어서, 실행된 것을 보려면 따로 골라야 한다.
+_WHERE_RUN = "WHERE q.run_id = ?"
+_WHERE_EXECUTED = (
+    "WHERE EXISTS (SELECT 1 FROM interactions i WHERE i.action_id = q.action_id)"
+)
+
+
+@dataclass
+class ChainLink:
+    """후보 한 건이 Action까지 이어진 경로."""
+
+    action_id: int
+    action_type: str
+    media_id: str
+    canonical_url: str
+    target_score: Optional[float]
+    has_analysis: bool
+    has_comment_draft: bool
+    approved_by: str
+    executed: bool
+    broken: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return not self.broken
+
+
+def collect_chain(
+    conn: sqlite3.Connection, run_id: Optional[str] = None
+) -> list[ChainLink]:
+    """**후보 → 분석 → 댓글 → Action → 실행**이 이어지는지 본다.
+
+    감사에서 중요한 것은 각 단계가 존재하는지가 아니라 **서로 연결돼 있는지**다.
+    중간 고리가 비어 있으면 나중에 "왜 이게 나갔는지"를 설명할 수 없다.
+
+    `run_id`를 주면 그 Run이 **만든** Action을, 주지 않으면 **실행된** Action을
+    본다. 한 Run이 실행하는 Action은 앞선 Run에서 만들어졌을 수 있다.
+    """
+    links: list[ChainLink] = []
+    where, params = (
+        (_WHERE_RUN, (run_id,)) if run_id is not None else (_WHERE_EXECUTED, ())
+    )
+    cursor = conn.execute(_CHAIN_SQL.format(where=where), params)
+    columns = [description[0] for description in cursor.description]
+    for values in cursor.fetchall():
+        row = dict(zip(columns, values))
+        broken: list[str] = []
+        if row["media_pk"] is None:
+            broken.append("candidate_missing")
+        if not int(row["analyses"] or 0):
+            broken.append("analysis_missing")
+        # Executor는 canonical_url이 없으면 permalink로 연다(실제 동작과 같은 기준).
+        # 둘 다 없을 때만 '열 주소가 없다'로 본다 — 검사가 실제보다 엄하면
+        # 멀쩡한 Action을 끊긴 것으로 보고하게 된다.
+        if not (str(row["canonical_url"] or "").strip() or str(row["permalink"] or "").strip()):
+            broken.append("target_url_missing")
+        if row["target_score"] is None:
+            broken.append("score_missing")
+        if str(row["action_type"]) == "COMMENT":
+            if not int(row["passed_drafts"] or 0):
+                broken.append("comment_draft_missing")
+            if row["status"] != "PENDING" and not str(row["comment_text"] or "").strip():
+                broken.append("comment_text_missing")
+        if row["status"] in ("SUCCESS", "FAILED") and not int(row["interactions"] or 0):
+            broken.append("interaction_missing")
+        links.append(
+            ChainLink(
+                action_id=int(row["action_id"]),
+                action_type=str(row["action_type"] or ""),
+                media_id=str(row["media_id"] or ""),
+                canonical_url=str(row["canonical_url"] or row["permalink"] or ""),
+                target_score=row["target_score"],
+                has_analysis=bool(int(row["analyses"] or 0)),
+                has_comment_draft=bool(int(row["passed_drafts"] or 0)),
+                approved_by=str(row["approved_by"] or UNKNOWN),
+                executed=bool(int(row["interactions"] or 0)),
+                broken=tuple(broken),
+            )
+        )
+    return links
+
+
+def _check_issues(report: AuditReport) -> None:
     for trace in report.traces:
         if trace.status in ("SUCCESS", "FAILED") and not trace.executed:
             report.issues.append(
@@ -191,4 +295,3 @@ def collect_audit(conn: sqlite3.Connection) -> AuditReport:
             report.issues.append(f"action {trace.action_id}: 실행 종료 시각이 비어 있습니다.")
         if trace.status == "FAILED" and not trace.error:
             report.issues.append(f"action {trace.action_id}: 실패인데 실패 사유가 비어 있습니다.")
-    return report
