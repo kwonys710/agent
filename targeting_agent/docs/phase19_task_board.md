@@ -15,6 +15,7 @@
 | 19J | Scheduler → Query Planner 연결 | DONE |
 | 19K | Dashboard Discovery Health / Query / Engagement | DONE |
 | 19L | E2E + Release Readiness Report + v0.3.0 | DONE |
+| 19M | COMMENT Live Canary (운영자 요청으로 추가·ARMED) | DONE |
 
 병렬: 19G(Comment browser path) ∥ 19A·19B·19D(Query/Novelty) — 파일 교집합 없음.
 순차: schema / database / config / policy / executor 를 건드리는 작업.
@@ -24,7 +25,7 @@
 | 항목 | 이유 |
 | --- | --- |
 | 실제 Instagram read-only smoke | 개발 환경은 instagram.com 차단 + 로그인 세션 없음(BLOCKED.md) |
-| 실제 COMMENT Canary | §33/§68 — 코드는 LIVE_READY, 실제 공개 댓글은 Operator Gate |
+| 실제 COMMENT Canary 1회 실행 | 코드·게이트 준비 완료(ARMED). 개발 환경은 instagram.com 차단 + 로그인 세션 없음 → 운영자 PC에서 `run_targeting_comment_canary.bat` |
 
 ## 원격 분기 통합 (2026-10-12)
 

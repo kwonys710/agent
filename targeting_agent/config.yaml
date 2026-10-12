@@ -215,6 +215,20 @@ activity:
   caution_recovery_hours: 24   # 조용한 기간이 지나면 CAUTION만 NORMAL로 복귀
   # STOPPED(Challenge / Action Block / 로그인 필요)는 자동으로 풀리지 않는다 — 사람이 확인한다.
 
+canary:
+  comment:
+    # Phase 19M — 실제 공개 댓글 Canary.
+    # 운영자 요청으로 ARMED(true). 이것만으로는 아무 댓글도 달리지 않는다 —
+    # `--comment-canary` 명령을 직접 실행해야 하고, 스케줄러/Autopilot은 이 경로를
+    # 호출하지 않는다. 중단하려면 다시 false로 바꾸면 된다.
+    # LIVE는 그 프로세스 안에서만 켜지고 config.yaml은 DRY_RUN 그대로 남는다.
+    enabled: true
+    max_comments_per_run: 1    # 첫 Canary는 1건. 늘리는 것도 운영자 판단이다.
+    lock:
+      enabled: true
+      path: "data/.canary_comment.lock"
+      stale_minutes: 30
+
 browser_executor:
   # Phase 18B — 운영자가 로그인한 브라우저로 LIKE / COMMENT만 수행한다.
   # FOLLOW / DM / 저장 / 공유는 구현하지 않는다.

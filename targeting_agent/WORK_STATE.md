@@ -324,7 +324,7 @@ Completed: 19.0 19A 19B 19C 19D 19E 19F 19G 19H 19I 19J 19K 19L
 schema v12(additive): query_bank / query_runs / candidate_queries +
 candidate_media(first_seen_at·last_seen_at·seen_count). 운영 DB 사본에서 v11→v12 검증.
 
-Tests: 566 passed (Phase 19 신규 101개)
+Tests: 813 passed (Phase 19 + 19M 신규 119개)
 Last commit: Phase 19K/19L analytics + v0.3.0
 
 정정: Phase 19는 002ccb8(18A.5) 기준으로 작업했고, 그 시점 로컬에는 18A.6/18D/18E가 없었다.
@@ -334,7 +334,10 @@ LIKE Canary 정책은 바꾸지 않았다.
 
 Final runtime config: autopilot.enabled=false · browser_executor.mode=DRY_RUN ·
 actions.execution.dry_run=true · scheduler.autopilot=false · browser_discovery.enabled=false
-COMMENT: LIVE_READY (실제 공개 댓글은 Operator Gate)
+COMMENT: ARMED — 운영자 요청으로 canary.comment.enabled=true
+  실제 게시는 `--comment-canary` 를 직접 실행할 때만 일어난다(상한 1건, 확인 필수).
+  Scheduler/Autopilot은 이 경로를 호출하지 않는다. 중단은 enabled=false.
+  개발 환경에서는 실행 불가(instagram.com 차단 + 로그인 세션 없음) — 운영자 PC에서 수행.
 
 Next: 운영 관찰 / v0.3 검토
 Meta API: Optional (진행을 막지 않음)

@@ -97,6 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scheduled Run(배치): inbox 처리 → 신규 후보 분석 → Daily Summary 생성",
     )
     parser.add_argument(
+        "--comment-canary",
+        action="store_true",
+        help="COMMENT Live Canary: 실제 공개 댓글을 상한(기본 1건)만큼 달고 확인한다",
+    )
+    parser.add_argument(
+        "--comment-canary-rehearsal",
+        action="store_true",
+        help="COMMENT Canary 전 구간을 DRY_RUN으로 점검한다(실제 게시 없음)",
+    )
+    parser.add_argument(
         "--release-report",
         action="store_true",
         help="v0.3.0 릴리스 준비 상태 보고서를 생성한다(DB 기준, LLM 호출 없음)",
@@ -514,6 +524,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.import_only:
         return run_import_only(config, args)
+
+    if args.comment_canary or args.comment_canary_rehearsal:
+        from .canary.comment_runner import format_result as format_comment_canary
+        from .canary.comment_runner import run_comment_canary
+
+        live = bool(args.comment_canary)
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            outcome = run_comment_canary(config, conn=conn, live=live)
+            print(format_comment_canary(outcome))
+            if live and outcome.confirmed:
+                print(
+                    "[안내] 실제 공개 댓글이 달렸습니다. Instagram에서 직접 확인하고, "
+                    "문제가 있으면 앱에서 삭제하세요."
+                )
+            return outcome.exit_code
+        finally:
+            conn.close()
 
     if args.release_report:
         from .learning.release_report import (
