@@ -290,6 +290,12 @@ browser_discovery:
   selector_timeout_ms: 4000  # selector 하나를 확인하는 대기(안 맞는 selector에 오래 매달리지 않는다)
   scroll_rounds: 3
   media_types: ["REEL"]
+  profile_meta:
+    # Phase 19N — Creator 프로필 공개 메타태그에서 팔로워 규모만 읽는다.
+    # creator_fit 축이 비면 Browser 후보 점수 상한이 79.5점이라 COMMENT 기준(82)에
+    # 닿지 못한다. Creator마다 한 번만 열고, 못 읽으면 0으로 남긴다(추측 금지).
+    enabled: true
+    max_profiles_per_run: 10
   executable_path: ""        # 비우면 Playwright 기본 Chromium을 쓴다(고정이 필요한 환경에서만 지정)
   queries: []              # 비우면 discovery.hashtags 를 검색어로 재사용한다
   limits:

@@ -48,6 +48,8 @@ from .browser_models import (
     SessionState,
 )
 from .browser_post_meta import parse_post_meta
+from .browser_profile_meta import ProfileMeta, parse_profile_meta, profile_url
+from .hashtag_discovery import UNRESOLVED_PREFIX
 from .browser_selectors import (
     BASE_URL,
     CANONICAL_SELECTOR,
@@ -92,6 +94,9 @@ class BrowserPage(Protocol):
     def open_post(self, url: str) -> Optional[PostDetail]: ...
 
     def capture_debug(self, name: str) -> Optional[str]: ...
+
+    # 선택 기능: 구현하지 않은 브라우저도 Discovery는 그대로 동작한다.
+    # def read_profile(self, username: str) -> Optional[ProfileMeta]: ...
 
     def close(self) -> None: ...
 
@@ -426,6 +431,34 @@ class PlaywrightBrowser:
             posted_at=meta.posted_at,
         )
 
+    def read_profile(self, username: str) -> Optional[ProfileMeta]:
+        """공개 프로필 페이지에서 팔로워 규모만 읽는다(Phase 19N).
+
+        페이지를 열어 **자신이 내보낸 메타태그**를 읽을 뿐이다. 팔로우/DM 같은
+        동작은 하지 않는다. 읽지 못하면 None — 0으로 단정하지 않는다.
+        """
+        url = profile_url(username, base_url=self.base_url)
+        if not url:
+            return None
+        try:
+            self.goto(url)
+        except Exception as exc:  # noqa: BLE001 - 프로필 1건 실패가 Run을 막지 않는다
+            logger.warning("프로필을 열지 못했습니다(%s): %s", username, type(exc).__name__)
+            return None
+        page = self._require_page()
+        body = ""
+        try:
+            body = (page.inner_text("body") or "")[:400]
+        except Exception:  # noqa: BLE001
+            body = ""
+        meta = parse_profile_meta(
+            og_description=self._attr_one(OG_DESCRIPTION_SELECTOR, "content"),
+            body_text=body,
+        )
+        if meta.followers is None and not meta.is_private:
+            logger.info("프로필 메타에서 팔로워 수를 읽지 못했습니다(%s).", username)
+        return meta
+
     def _attr_one(self, selector: str, attribute: str) -> str:
         """단일 요소의 속성을 읽는다(없으면 빈 문자열 — 대기하지 않는다)."""
         page = self._require_page()
@@ -529,6 +562,7 @@ class InstagramBrowserDiscovery(DiscoverySource):
         max_candidates_per_query: int = 10,
         max_candidates_per_run: int = 40,
         media_types: Sequence[str] = ("REEL",),
+        max_profiles: int = 10,
         stop_on_login_required: bool = True,
         stop_on_challenge: bool = True,
         stop_on_warning: bool = True,
@@ -539,12 +573,15 @@ class InstagramBrowserDiscovery(DiscoverySource):
         self.max_candidates_per_query = int(max_candidates_per_query)
         self.max_candidates_per_run = int(max_candidates_per_run)
         self.media_types = {str(t).upper() for t in media_types}
+        self.max_profiles = max(0, int(max_profiles))
         self.stop_on = {
             SessionState.LOGIN_REQUIRED: stop_on_login_required,
             SessionState.CHALLENGE: stop_on_challenge,
             SessionState.PLATFORM_WARNING: stop_on_warning,
         }
         self.stats = DiscoveryStats()
+        self.profiles_read = 0
+        self.followers_found = 0
         # 같은 Run에서 같은 Reel을 찾은 검색어들(19D: 후보 행은 하나, 검색어는 여러 개).
         # 키는 shortcode다 — /p/ 와 /reel/ 두 형태가 같은 게시물을 가리킬 수 있다.
         self._by_code: dict[str, RawCandidate] = {}
@@ -624,6 +661,7 @@ class InstagramBrowserDiscovery(DiscoverySource):
             self.stats.collected,
             ", ".join(f"{k}={v}" for k, v in sorted(self.stats.skips.items())) or "없음",
         )
+        self._enrich_followers(candidates)
         if not self.stats.accounted():
             # 설명되지 않은 drop이 있으면 조용히 넘기지 않는다.
             logger.warning(
@@ -634,6 +672,52 @@ class InstagramBrowserDiscovery(DiscoverySource):
                 self.stats.detail_failed,
             )
         return candidates
+
+    def _enrich_followers(self, candidates: Sequence[RawCandidate]) -> None:
+        """Creator별로 프로필을 **한 번만** 열어 팔로워 규모를 채운다(Phase 19N).
+
+        creator_fit 축이 정보 없음(0.5)에 묶이면 Browser 후보의 점수 상한이
+        79.5점이라 COMMENT 기준 82에 닿지 못한다. 그 축을 채우기 위한 패스다.
+
+        - 후보마다가 아니라 **Creator마다** 한 번 연다.
+        - 실행당 상한(max_profiles)을 넘지 않는다.
+        - 읽지 못하면 0으로 남긴다(지어내지 않는다).
+        """
+        if not self.max_profiles or not candidates:
+            return
+        reader = getattr(self.browser, "read_profile", None)
+        if reader is None:
+            return
+
+        by_creator: dict[str, list[RawCandidate]] = {}
+        for candidate in candidates:
+            name = str(candidate.username or "")
+            if not name or name.startswith(UNRESOLVED_PREFIX):
+                continue
+            by_creator.setdefault(name, []).append(candidate)
+
+        for username in list(by_creator)[: self.max_profiles]:
+            try:
+                meta = reader(username)
+            except Exception as exc:  # noqa: BLE001 - 프로필 1건 실패를 격리한다
+                logger.warning("프로필 읽기 실패(%s): %s", username, type(exc).__name__)
+                continue
+            self.profiles_read += 1
+            if meta is None:
+                continue
+            for candidate in by_creator[username]:
+                if meta.followers is not None:
+                    candidate.followers = int(meta.followers)
+                    candidate.extra["followers_approximate"] = bool(meta.approximate)
+                if meta.is_private:
+                    candidate.is_private = True
+            if meta.followers is not None:
+                self.followers_found += 1
+        logger.info(
+            "프로필 보강: %d개 Creator 확인 · 팔로워 확보 %d",
+            self.profiles_read,
+            self.followers_found,
+        )
 
     @staticmethod
     def _sample(result: QueryResult, link: str, **fields: str) -> None:

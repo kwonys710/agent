@@ -367,6 +367,9 @@ def _discover(
             config.get("browser_discovery.limits.max_candidates_per_run", 40)
         ),
         media_types=config.get("browser_discovery.media_types", ["REEL"]) or ["REEL"],
+        max_profiles=int(config.get("browser_discovery.profile_meta.max_profiles_per_run", 10))
+        if bool(config.get("browser_discovery.profile_meta.enabled", True))
+        else 0,
         stop_on_login_required=bool(
             config.get("browser_discovery.stop_on.login_required", True)
         ),
