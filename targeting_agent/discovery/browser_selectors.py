@@ -18,6 +18,10 @@ from __future__ import annotations
 
 BASE_URL = "https://www.instagram.com"
 HOME_URL = BASE_URL + "/"
+# 검색 제출 시 Instagram 웹 UI가 **스스로 이동하는** 공개 결과 주소다(18A.6).
+# 비공개 endpoint가 아니라 주소창에 그대로 보이는 화면이므로, 입력창 클릭이
+# 겹친 레이어에 가로막히는 환경에서도 같은 결과 화면으로 갈 수 있다.
+SEARCH_URL_TEMPLATE = BASE_URL + "/explore/search/keyword/?q={query}"
 
 # selector 후보는 (key, selector) 순서쌍으로 둔다.
 # key는 실패 로그/스크린샷 파일명에 그대로 쓰여서 "어느 selector가 안 맞는지"를 알려 준다.
@@ -41,6 +45,9 @@ SEARCH_INPUT: tuple[Entry, ...] = (
     ("input_placeholder_en", 'input[placeholder="Search"]'),
     ("input_aria_ko", 'input[aria-label="검색 입력"]'),
     ("input_aria_en", 'input[aria-label="Search input"]'),
+    # 2026 화면은 라벨 어순이 다르다("입력 검색").
+    ("input_aria_ko_alt", 'input[aria-label="입력 검색"]'),
+    ("input_aria_en_alt", 'input[aria-label="Input search"]'),
     ("input_role_searchbox", '[role="searchbox"]'),
     ("input_search_type", 'input[type="search"]'),
 )
@@ -56,29 +63,52 @@ SEARCH_RESULT_ACCOUNT: tuple[Entry, ...] = (
     ("result_account_any", 'a[href^="/"][role="link"]:not([href*="/explore/"])'),
 )
 
-# --- 4) 결과 페이지(태그/프로필)에 도착했는지 ------------------------------
+# --- 4) 결과 페이지(태그/프로필/키워드)에 도착했는지 ------------------------
 RESULT_PAGE_MARKERS: tuple[Entry, ...] = (
     ("result_page_reel_link", 'a[href*="/reel/"]'),
     ("result_page_post_link", 'main a[href*="/p/"]'),
     ("result_page_main", "main article"),
 )
 
-# --- 5) Reel 링크 --------------------------------------------------------
-# 실기(Phase 18A.5)에서 확인된 형태를 모두 받는다.
-#   /reel/<code>/ · /<username>/reel/<code>/ · /reels/videos/<code>/
+# --- 5) 콘텐츠 링크 ------------------------------------------------------
+# 실기에서 확인된 형태를 모두 받는다.
+#   /reel/<code>/ · /<username>/reel/<code>/ · /reels/videos/<code>/ · /p/<code>/
+# 2026 검색 결과 그리드는 Reel도 **/p/<code>/ 로만** 링크한다(18A.6).
+# 그래서 /p/ 도 함께 모으고, Reel 여부는 그리드 배지와 상세의 canonical로 판정한다.
 # 정규화·중복 제거는 Phase 12A가 하므로 여기서는 넓게 모으기만 한다.
 POST_LINK_SELECTORS: tuple[Entry, ...] = (
     ("reel_href", 'a[href*="/reel/"]'),
     ("reels_href", 'a[href*="/reels/"]'),
     ("reel_href_main", 'main a[href*="/reel/"]'),
+    ("post_href_main", 'main a[href*="/p/"]'),
+    ("post_href", 'a[href*="/p/"]'),
 )
 
+# 그리드 타일이 Reel인지 알려 주는 배지 아이콘의 aria-label(한국어 + 영어).
+# 상세를 열기 전에 비(非)Reel 타일을 걸러 내 예산을 아끼기 위한 것이다.
+REEL_BADGE_LABELS: tuple[str, ...] = ("릴스", "클립", "Reels", "Reel", "Clip")
+
 # --- 6) 상세 화면 --------------------------------------------------------
+# 콘텐츠가 실제로 어떤 permalink인지는 페이지가 스스로 밝힌 canonical을 믿는다.
+# (/p/<code>/ 로 열어도 Reel이면 canonical은 /reel/<code>/ 다 — 18A.6 실기 확인)
+CANONICAL_SELECTOR = 'link[rel="canonical"]'
+# Open Graph 메타는 "지금 연 permalink 하나"의 작성자·본문을 담은 공개 태그다.
+# 화면 DOM의 caption 영역에는 다른 사람이 남긴 글과 인접 Reel 본문이 섞여 들어오므로,
+# 어느 콘텐츠의 본문인지 확실한 이 태그를 1순위로 읽는다(비공개 API가 아니다).
+OG_DESCRIPTION_SELECTOR = 'meta[property="og:description"]'
+OG_TITLE_SELECTOR = 'meta[property="og:title"]'
+
 USERNAME_SELECTORS: tuple[Entry, ...] = (
     ("username_header_link", 'header a[href^="/"][role="link"]'),
     ("username_article_header", "article header a[href^=\"/\"]"),
     ("username_dialog_header", '[role="dialog"] header a[href^="/"]'),
     ("username_main_link", 'main header a[href^="/"]'),
+)
+# 2026 상세 화면에는 header/article이 없다. 본문 영역의 첫 **프로필 링크**가
+# 작성자다 — /reels/audio/, /explore/ 같은 예약 경로를 걸러 내고 고른다.
+USERNAME_FALLBACK_SELECTORS: tuple[Entry, ...] = (
+    ("username_main_profile_link", 'main a[href^="/"]'),
+    ("username_any_profile_link", 'a[href^="/"][role="link"]'),
 )
 CAPTION_SELECTORS: tuple[Entry, ...] = (
     ("caption_h1", "article h1"),
@@ -86,6 +116,15 @@ CAPTION_SELECTORS: tuple[Entry, ...] = (
     ("caption_page_h1", "main h1"),
     ("caption_article_span", 'article span[dir="auto"]'),
     ("caption_dialog_span", '[role="dialog"] span[dir="auto"]'),
+)
+
+# username 자리에 올 수 없는 Instagram 예약 경로(프로필 링크 오탐 방지).
+PROFILE_RESERVED_SEGMENTS = frozenset(
+    {
+        "explore", "reel", "reels", "p", "tv", "stories", "direct", "accounts",
+        "s", "about", "legal", "privacy", "terms", "challenge", "emails",
+        "your_activity", "notifications",
+    }
 )
 
 # --- 세션 상태 판정 --------------------------------------------------------

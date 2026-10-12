@@ -222,6 +222,84 @@ Phase 18A.5 완료: Candidate Collection Pipeline Hotfix
 - Autopilot DRY_RUN 리허설: Queue LIKE 5·COMMENT 5 → 자동 승인 10 → 실행 성공 6·보류 4
   (보류는 creator_daily_limit), 실제 쓰기 0, 브라우저 미실행
 
+Phase 18A.6 완료: 2026 Instagram 화면 대응 (운영자 Windows PC 실기)
+- 실기에서 검색어 1개가 통째로 실패(stage=SEARCH_RESULT_NOT_FOUND / 수집 0) → 직접 화면을 열어 원인 3가지 확인
+  1) /explore/ 검색 입력창 위에 다른 DIV가 겹쳐 click()이 TimeoutError
+     → 웹 UI가 검색 제출 시 스스로 이동하는 공개 주소(/explore/search/keyword/?q=)를 1순위로,
+       막히면 기존 클릭·입력 경로로 fallback, 클릭이 가로막히면 focus + 키 입력
+  2) 검색 결과 그리드 21/21이 /p/<code>/ 였고 Reel 여부는 릴스 배지로만 보임
+     → /p/ 도 수집하고 Reel 판정은 상세의 link[rel=canonical]로. 배지는 순서만 앞당김(버리지 않음)
+  3) 상세 화면에 article/header/h1 없음 → 공개 og 태그에서 작성자·본문·반응 수·게시일 추출
+- 실기 결과: Reel 발견 49 / 수집 49 / username 100% / caption 100% / selector 오류 0 / 쓰기 0
+
+Phase 18D 완료: Live Readiness & Calibration
+- 판정 CONDITIONAL_GO (기술 준비도 READY · Target 보정 신뢰도 LOW)
+- 18D.1 감사: action_queue.executor(예정) vs interactions.executor(실제)를 Planned/Actual로 분리.
+  schema 추가 없음. 생성 주체는 run_id ↔ autopilot_runs 로 유도. 연결 끊긴 실행 기록도 감사 공백으로 검출
+- 18D.2 보정: Browser 후보가 60~70점대인 원인은 부적합이 아니라 '모름'이었다.
+  followers·posted_at 미수집 → creator_fit/activity/engagement(가중치 0.50)가 중립값에 묶여 상한 75.0점.
+  COMMENT 임계값 82는 도달 불가였다. 임계값 대신 **빠진 데이터**를 고쳤다 —
+  og:description에 이미 있던 게시 날짜를 파싱해 posted_at을 채우니 상한 75.0 → 82.5
+- 18D.3 댓글: 거절 11.5% / generic 1.6% / Template 11.5% / caption 근거 100% → Prompt 수정 근거 없음(유지)
+- 18D.4 추정: 현재 설정 하루 예상 LIKE 5 · COMMENT 5. 단 자격 후보가 전부 import CSV이고
+  Browser Discovery 후보는 0건 — 지금 수집 경로는 Action으로 이어지지 않는다
+- 18D.5 가드: 이중 스위치(mode=LIVE AND dry_run=false)만 실제 쓰기를 연다는 것을 회귀 테스트로 고정.
+  Configured/Effective를 모든 실행 시작에 한 줄로 기록
+- 18D.6 Canary: Discovery → 분석 → Queue → 승인 → Browser Executor DRY_RUN → Report 전 구간,
+  후보→실행 사슬 끊김 0, 실제 쓰기 0 (운영 DB 사본 사용)
+- 18D.7/8: `--live-readiness` 로 결정론적 보고서 생성(LLM 호출 없음)
+- 테스트 618건 통과(Phase 18D에서 130건 추가)
+
+Phase 18E 구현 완료 / 실제 LIKE 미수행: Limited Live Canary (LIKE 전용)
+- 상한을 코드에 박았다: 총 6 / 하루 3 / 1회 2 / 48시간 / 최소 8시간 간격
+- config.yaml은 LIVE로 바뀌지 않는다 — 프로세스 메모리 사본에서만 전환하고,
+  안쪽은 기존 BrowserExecutor 그대로라 두 스위치 계약을 똑같이 통과한다
+- 한도는 data/live_canary_state.json 에 남는다(gitignore). Scheduler가 잘못 떠도
+  상태가 '다 썼다'면 no-op. 상태 파일이 깨지면 '처음부터'가 아니라 FAILED로 막는다
+- COMMENT 이중 차단: Queue에서 LIKE만 승인 + Executor가 호출 자체를 위반으로 중단
+  (CanaryViolation은 PlatformWarningError 상속 — Action 단위 격리가 아니라 Run 중단)
+- click 성공 ≠ 좋아요 남음. 새로고침해 유지되는지 확인하고, 확인 못 하면
+  UNKNOWN_WRITE_STATE로 남기고 다시 누르지 않는다(재클릭은 좋아요 취소다)
+- 대상 조건에 canonical_url 필수를 추가 — 실제로 열어 본 적 있는 게시물만 누른다
+- 실제 Chromium fixture로 LIVE 경로 검증(누르기/확인/새로고침/중복/COMMENT 차단)
+- 테스트 47건 추가, 전체 665 PASS
+
+**실제 LIKE는 수행하지 않았다.** 자격 후보가 0건이기 때문이다.
+  실제 후보 최고점 71.50 < LIKE 임계값 75
+  75를 넘는 6건은 전부 CSV 샘플(canonical_url 없음) → 대상 아님
+  오늘 Claude 20/20 소진으로 추가 분석 불가
+  임계값을 낮추지 않고 NO_ELIGIBLE_CANDIDATES로 정상 종료했다.
+  (18E.1에서 Resume Scheduler를 설치했다 — 깨우기만 하고 쓰기는 게이트가 정한다.)
+
+Phase 18E.1 완료: Canary 자동 이어가기
+- '기다리는 것'을 실패와 구분했다 — WAITING_AI_BUDGET / WAITING_ELIGIBLE
+- **48시간 창을 '처음 실제로 누르려는 때'부터 센다.** 이전에는 Canary를 만든
+  순간부터 세서, 후보가 없어 기다리는 동안 창이 흘러가 한 번도 못 눌러 보고
+  만료될 수 있었다. 기다린 시간은 쓰기 기간이 아니다
+- 합성 주소 차단을 자격 판정 안으로(_eligible_actions 한 곳에서만 판단).
+  SAMPLE001 처럼 열어 본 적 없는 주소는 점수와 무관하게 대상이 아니다
+- Claude 한도는 기존 집계(DAILY_METRIC + today_str)를 그대로 읽는다.
+  reset 시각을 추측하지 않고, 남은 예산만큼만 Discovery 분석에 쓴다
+- 상태 파일이 없는데 실제 LIKE 기록이 있으면 새 Canary를 열지 않고 멈춘다
+- 동시 실행은 기존 SchedulerLock 재사용으로 막는다
+- Windows Task 설치: DailyReels_Targeting_CanaryResume (8시간 간격, IgnoreNew)
+  Task는 깨우기만 한다 — 실제로 누를지는 Runner의 상태·한도·게이트가 정한다
+- 테스트 29건 추가, 전체 694 통과
+
+현재 Canary 상태: WAITING_AI_BUDGET
+  Claude 20/20 소진 · 자격 후보 0 · 실제 후보 최고점 71.50 (임계값 75)
+  LIVE 창 미개시 · 실제 Instagram 쓰기 0
+  한도가 회복되면 Scheduler가 Discovery → 분석 → 자격 확인 → 리허설 →
+  제한된 실제 LIKE 까지 자동으로 이어간다(사용자 개입 불필요).
+
+Next: Scheduler 자동 진행 관찰 → 첫 실제 LIKE → 재판정
+  1) Claude 일일 한도 회복 후 run_targeting_discovery.bat --discover 로
+     최신 Reel 수집 + 분석(최근 게시물일수록 activity 점수가 높아 75를 넘길 수 있다)
+  2) run_targeting_canary_rehearsal.bat 로 리허설(실제 쓰기 0)
+  3) run_targeting_live_canary.bat 로 첫 실제 Canary(최대 2건)
+  4) 성공 확인 후에만 Scheduler 설치
+Dashboard에서 사람 Feedback 축적(Target 보정 신뢰도 LOW → 상향)
+
 === v0.3.0 / Phase 19 — Multi-Agent Discovery & Engagement Upgrade ===
 
 Completed: 19.0 19A 19B 19C 19D 19E 19F 19G 19H 19I 19J 19K 19L
@@ -249,7 +327,10 @@ candidate_media(first_seen_at·last_seen_at·seen_count). 운영 DB 사본에서
 Tests: 566 passed (Phase 19 신규 101개)
 Last commit: Phase 19K/19L analytics + v0.3.0
 
-주의: 이 저장소에는 18D/18E/LIKE Canary가 없다(지시 전제와 다름). LIKE는 DRY_RUN 유지.
+정정: Phase 19는 002ccb8(18A.5) 기준으로 작업했고, 그 시점 로컬에는 18A.6/18D/18E가 없었다.
+원격에는 있었고(다른 세션이 push) 이 커밋에서 merge했다. 18A.6의 2026 DOM 대응과
+Canary/Readiness 모듈은 그대로 유지하고, Phase 19는 그 위에 올라간다.
+LIKE Canary 정책은 바꾸지 않았다.
 
 Final runtime config: autopilot.enabled=false · browser_executor.mode=DRY_RUN ·
 actions.execution.dry_run=true · scheduler.autopilot=false · browser_discovery.enabled=false
@@ -259,10 +340,9 @@ Next: 운영 관찰 / v0.3 검토
 Meta API: Optional (진행을 막지 않음)
 
 Pending:
-- 실제 Instagram Smoke(운영자 PC) — BLOCKED.md 참고. 개발 환경은 Instagram 접근 차단 + 로그인 세션 없음.
-  1) run_targeting_discovery.bat --discover-only --query "직장인"
-  2) 실패 시 stage + selector key + data/browser_debug 스크린샷만 보고(추측 반복 실행 금지)
-- LIVE 전환은 운영자 판단(browser_executor.mode / autopilot.enabled)
+- LIVE 전환은 운영자 판단(browser_executor.mode / actions.execution.dry_run 둘 다 풀어야 함)
+- 작성자 followers 수집 — Browser Discovery 후보가 Action 자격을 얻으려면 필요(18D.2)
+- 사람 Feedback 10건 이상 축적 후 임계값 재검토(그 전에는 근거 없음)
 - 실제 Instagram 계정/토큰으로 Hashtag Discovery 검증(권한 심사 필요)
 - Gemini 분석/댓글 생성 실사용 검증(API Key 필요)
 - 운영 데이터 축적 후 학습 임계값(min_keyword_media 등) 재조정
