@@ -61,6 +61,10 @@ ADDED_COLUMNS = (
     ("browser_discovery_runs", "detail_failed", "INTEGER"),
     # v11(Phase 18C.1): 누가 승인했는지 — NULL은 기존 운영자 승인으로 본다.
     ("action_queue", "approved_by", "TEXT"),
+    # v12(Phase 19D): Novelty — 같은 Reel이 여러 검색어에서 반복 발견되는 것을 추적한다.
+    ("candidate_media", "first_seen_at", "TEXT"),
+    ("candidate_media", "last_seen_at", "TEXT"),
+    ("candidate_media", "seen_count", "INTEGER"),
 )
 NEW_COLUMNS_V2 = ADDED_COLUMNS  # 이전 이름 호환
 

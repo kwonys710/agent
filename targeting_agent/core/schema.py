@@ -8,6 +8,9 @@
 - comment_drafts(media_pk, normalized_text) UNIQUE (동일 댓글 중복 저장 차단)
 - candidate_media.canonical_url UNIQUE (URL 입력 시 동일 게시물 중복 차단)
 
+v12(Phase 19): query_bank / query_runs / candidate_queries — 검색어 은행과 성과, 후보별 발견 검색어.
+candidate_media에 first_seen_at / last_seen_at / seen_count(Novelty).
+
 v11(Phase 18C.1): action_queue.approved_by — 운영자 승인과 Autopilot 자동 승인을 구분한다.
 학습 신호는 사람의 승인만 사용한다(자기 강화 방지).
 
@@ -33,7 +36,7 @@ import_events 테이블 추가. 기존 DB는 core/database.py의 마이그레이
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -73,7 +76,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         status_reason TEXT,
         target_score REAL,
         discovered_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        first_seen_at TEXT,
+        last_seen_at TEXT,
+        seen_count INTEGER NOT NULL DEFAULT 1
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_candidate_status ON candidate_media(status)",
@@ -267,6 +273,59 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         cache_hits INTEGER NOT NULL DEFAULT 0,
         errors INTEGER NOT NULL DEFAULT 0,
         halt_reason TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS query_bank (
+        query_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query TEXT NOT NULL UNIQUE,
+        category TEXT NOT NULL DEFAULT 'etc',
+        origin TEXT NOT NULL DEFAULT 'seed',
+        status TEXT NOT NULL DEFAULT 'ACTIVE'
+            CHECK (status IN ('ACTIVE', 'EXPERIMENTAL', 'COOLDOWN', 'DISABLED')),
+        run_count INTEGER NOT NULL DEFAULT 0,
+        last_run_at TEXT,
+        found_count INTEGER NOT NULL DEFAULT 0,
+        new_count INTEGER NOT NULL DEFAULT 0,
+        duplicate_count INTEGER NOT NULL DEFAULT 0,
+        unique_creator_count INTEGER NOT NULL DEFAULT 0,
+        score_sum REAL NOT NULL DEFAULT 0,
+        score_count INTEGER NOT NULL DEFAULT 0,
+        score_75_plus INTEGER NOT NULL DEFAULT 0,
+        score_82_plus INTEGER NOT NULL DEFAULT 0,
+        utility REAL,
+        last_success_at TEXT,
+        cooldown_until TEXT,
+        status_reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_query_bank_status ON query_bank(status, last_run_at)",
+    """
+    CREATE TABLE IF NOT EXISTS query_runs (
+        query_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query_id INTEGER NOT NULL REFERENCES query_bank(query_id) ON DELETE CASCADE,
+        run_id TEXT,
+        started_at TEXT NOT NULL,
+        found INTEGER NOT NULL DEFAULT 0,
+        collected INTEGER NOT NULL DEFAULT 0,
+        new_candidates INTEGER NOT NULL DEFAULT 0,
+        duplicates INTEGER NOT NULL DEFAULT 0,
+        unique_creators INTEGER NOT NULL DEFAULT 0,
+        failed INTEGER NOT NULL DEFAULT 0,
+        failed_stage TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_query_runs_query ON query_runs(query_id, started_at)",
+    """
+    CREATE TABLE IF NOT EXISTS candidate_queries (
+        media_pk INTEGER NOT NULL REFERENCES candidate_media(media_pk) ON DELETE CASCADE,
+        query_id INTEGER NOT NULL REFERENCES query_bank(query_id) ON DELETE CASCADE,
+        first_found_at TEXT NOT NULL,
+        last_found_at TEXT NOT NULL,
+        found_count INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (media_pk, query_id)
     )
     """,
     """

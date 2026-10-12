@@ -25,7 +25,9 @@ from ..core.exceptions import BrowserSessionError, TargetingError
 from ..core.logger import get_logger
 from ..scheduler.lock import SchedulerLock
 from .browser_models import SOURCE_BROWSER_SEARCH, SessionState
-from .ingest import ADDED, CandidateIngestor, ImportSummary
+from .ingest import ADDED, DUPLICATE, CandidateIngestor, ImportSummary
+from .novelty import NoveltyStats, record_discovery
+from .query_bank import QueryRunStats, QueryStatus, ensure_queries, record_query_run, seed_bank
 
 logger = get_logger("discovery.browser_runner")
 
@@ -67,6 +69,11 @@ class BrowserDiscoveryResult:
     failed_queries: int = 0
     skips: dict[str, int] = field(default_factory=dict)
     samples: list[dict[str, str]] = field(default_factory=list)
+    # Phase 19: 검색어 출처와 Novelty
+    planned_queries: list[str] = field(default_factory=list)
+    query_source: str = "config"
+    repeat_candidates: int = 0
+    claude_calls_saved: int = 0
     # 추출 품질(Phase 18A.3)
     username_found: int = 0
     caption_found: int = 0
@@ -146,6 +153,88 @@ def _default_processor(config: Config, conn: sqlite3.Connection) -> Any:
     )
 
 
+def _resolve_queries(
+    conn: sqlite3.Connection, config: Config, queries: Optional[Sequence[str]]
+) -> tuple[list[str], str]:
+    """이번 Run의 검색어를 정한다.
+
+    우선순위: 명시 인자(--query) > Query Planner(19B) > config 목록.
+    Planner를 쓰는 경우에도 config의 검색어는 은행에 반영해 둔다(유실 방지).
+    """
+    if queries:
+        explicit = [str(q).strip() for q in queries if str(q).strip()]
+        if explicit:
+            ensure_queries(conn, explicit, origin="operator", status=QueryStatus.ACTIVE)
+            return explicit, "explicit"
+
+    configured = queries_from_config(config)
+    if not bool(config.get("query_planner.enabled", True)):
+        return configured, "config"
+
+    from .query_planner import plan_queries
+
+    if bool(config.get("query_planner.seed_on_start", True)):
+        seed_bank(conn)
+    if configured:
+        ensure_queries(conn, configured, origin="config", status=QueryStatus.ACTIVE)
+
+    plan = plan_queries(conn, config)
+    if plan.queries:
+        return list(plan.queries), "planner"
+    logger.warning("Query Planner가 검색어를 고르지 못했습니다 — config 목록으로 되돌립니다.")
+    return configured, "config_fallback"
+
+
+def _record_query_performance(
+    conn: sqlite3.Connection,
+    config: Config,
+    result: BrowserDiscoveryResult,
+    attribution: dict[str, dict[str, Any]],
+) -> None:
+    """검색어별 성과를 query_bank에 누적한다(점수는 저장된 Target Score를 읽는다)."""
+    if not bool(config.get("query_planner.enabled", True)) or not attribution:
+        return
+
+    from .query_bank import get_query
+
+    for query, data in attribution.items():
+        record = get_query(conn, query)
+        if record is None:
+            continue
+        media_pks = data.get("media_pks") or []
+        scores: list[float] = []
+        if media_pks:
+            placeholders = ",".join("?" for _ in media_pks)
+            rows = conn.execute(
+                f"SELECT target_score FROM candidate_media WHERE media_pk IN ({placeholders}) "
+                "AND target_score IS NOT NULL",
+                tuple(media_pks),
+            ).fetchall()
+            scores = [float(row["target_score"]) for row in rows]
+        failed = query in {
+            str(detail).split("query=", 1)[-1].split(" ", 1)[0]
+            for detail in result.details
+            if "query=" in str(detail)
+        }
+        record_query_run(
+            conn,
+            record.query_id,
+            QueryRunStats(
+                found=int(data.get("found", 0)),
+                collected=int(data.get("collected", 0)),
+                new_candidates=int(data.get("new", 0)),
+                duplicates=int(data.get("duplicate", 0)),
+                unique_creators=len(data.get("creators") or set()),
+                scores=scores,
+                failed=failed,
+            ),
+        )
+
+    from .query_planner import refresh_utilities
+
+    refresh_utilities(conn, config)
+
+
 def queries_from_config(config: Config) -> list[str]:
     """검색어 목록. 명시된 queries가 없으면 기존 해시태그 설정을 재사용한다."""
     raw = config.get("browser_discovery.queries", None)
@@ -199,7 +288,8 @@ def run_browser_discovery(
             conn = get_connection(config.db_path)
             init_db(conn)
 
-        query_list = list(queries) if queries else queries_from_config(config)
+        query_list, result.query_source = _resolve_queries(conn, config, queries)
+        result.planned_queries = list(query_list)
         if not query_list:
             result.status = STATUS_FAILED
             result.message = "검색어가 없습니다(browser_discovery.queries / discovery.hashtags)."
@@ -210,9 +300,10 @@ def run_browser_discovery(
             browser = browser_factory(config)
 
         candidates = _discover(config, browser, query_list, result)
-        _ingest(conn, candidates, result)
+        attribution = _ingest(conn, candidates, result)
         if process and result.added_media_pks:
             _process(config, conn, result, processor_factory)
+        _record_query_performance(conn, config, result, attribution)
 
         _record_daily_stats(conn, config, result)
     except BrowserSessionError as exc:
@@ -322,11 +413,27 @@ def _status_of(ok_queries: int, failed_queries: int, collected: int) -> str:
 
 def _ingest(
     conn: sqlite3.Connection, candidates: Sequence[Any], result: BrowserDiscoveryResult
-) -> ImportSummary:
-    """Phase 12A의 CandidateIngestor를 그대로 쓴다(중복 판정·import_events 기록 동일)."""
+) -> dict[str, dict[str, Any]]:
+    """Phase 12A의 CandidateIngestor를 그대로 쓰고, Phase 19D Novelty를 기록한다.
+
+    반복 발견(DUPLICATE)은 metadata만 갱신한다 — 재분석도 Action 생성도 하지 않는다.
+    반환값은 검색어별 성과 집계(Query Bank에 누적할 입력)다.
+    """
+    from .query_bank import get_query
+
     ingestor = CandidateIngestor(conn)
     summary = ImportSummary()
+    novelty = NoveltyStats()
+    attribution: dict[str, dict[str, Any]] = {}
+
     for candidate in candidates:
+        query = str(candidate.extra.get("source_query") or "")
+        bucket = attribution.setdefault(
+            query, {"found": 0, "collected": 0, "new": 0, "duplicate": 0, "creators": set(), "media_pks": []}
+        )
+        bucket["found"] += 1
+        bucket["collected"] += 1
+
         item = ingestor.add_candidate(
             candidate,
             original_url=candidate.permalink,
@@ -334,13 +441,34 @@ def _ingest(
             source=SOURCE_BROWSER_SEARCH,
             summary=summary,
         )
-        if item.result == ADDED and item.media_pk is not None:
+        is_new = item.result == ADDED
+        if is_new and item.media_pk is not None:
             result.added_media_pks.append(int(item.media_pk))
+            bucket["new"] += 1
+            bucket["media_pks"].append(int(item.media_pk))
+            bucket["creators"].add(candidate.username)
+        elif item.result == DUPLICATE:
+            bucket["duplicate"] += 1
+
+        if item.media_pk is not None and item.result in (ADDED, DUPLICATE):
+            record = get_query(conn, query) if query else None
+            record_discovery(
+                conn,
+                int(item.media_pk),
+                query=query,
+                query_id=record.query_id if record else None,
+                is_new=is_new,
+                stats=novelty,
+            )
+    conn.commit()
+
     result.added = summary.added
     result.duplicate = summary.duplicate
     result.invalid = summary.invalid
     result.other_errors += summary.error
-    return summary
+    result.repeat_candidates = novelty.repeat_candidates
+    result.claude_calls_saved = novelty.claude_calls_saved
+    return attribution
 
 
 def _process(
@@ -351,7 +479,8 @@ def _process(
 ) -> None:
     """신규 후보만 CandidateProcessor로 넘긴다. Claude 한도는 Processor가 관리한다."""
     limit = int(config.get("browser_discovery.limits.max_analyze_per_run", 20))
-    targets = result.added_media_pks[:limit] if limit else list(result.added_media_pks)
+    targets = _freshness_order(conn, config, result.added_media_pks)
+    targets = targets[:limit] if limit else targets
     if not targets:
         return
 
@@ -377,6 +506,30 @@ def _process(
     if usage is not None:
         result.claude_calls = usage.claude_calls
         result.cache_hits = usage.cache_hits
+
+
+def _freshness_order(
+    conn: sqlite3.Connection, config: Config, media_pks: Sequence[int]
+) -> list[int]:
+    """최근 게시물·신규 Creator를 먼저 분석하도록 순서만 바꾼다(점수는 그대로)."""
+    if not media_pks or not bool(config.get("freshness.enabled", True)):
+        return list(media_pks)
+
+    from .freshness import creator_interaction_counts, sort_candidates
+
+    placeholders = ",".join("?" for _ in media_pks)
+    rows = conn.execute(
+        f"SELECT media_pk, creator_id, posted_at, COALESCE(seen_count, 1) AS seen_count "
+        f"FROM candidate_media WHERE media_pk IN ({placeholders})",
+        tuple(int(pk) for pk in media_pks),
+    ).fetchall()
+    counts = (
+        creator_interaction_counts(conn)
+        if bool(config.get("freshness.prefer_new_creators", True))
+        else {}
+    )
+    ordered = sort_candidates(rows, creator_counts=counts)
+    return [int(dict(row)["media_pk"]) for row in ordered]
 
 
 def _record_daily_stats(

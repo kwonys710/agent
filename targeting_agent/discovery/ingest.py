@@ -21,7 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from ..core.database import insert_candidate, record_import_event, transaction
+from ..core.database import (
+    find_candidate,
+    insert_candidate,
+    record_import_event,
+    transaction,
+)
 from ..core.exceptions import DiscoveryError
 from ..core.logger import get_logger
 from ..core.models import MediaStatus, RawCandidate
@@ -166,10 +171,13 @@ class CandidateIngestor:
             with transaction(self.conn):
                 media_pk = insert_candidate(self.conn, candidate, status=status)
             if media_pk is None:
+                # 중복이어도 기존 후보의 media_pk를 알려 준다(Phase 19D Novelty가 쓴다).
+                # 판정은 Phase 12A find_candidate를 그대로 재사용한다.
                 item = ImportResult(
                     result=DUPLICATE,
                     original_url=original_url or candidate.permalink,
                     canonical_url=candidate.canonical_url,
+                    media_pk=find_candidate(self.conn, candidate),
                     source_file=source_file,
                     source_row=source_row,
                     note=note or candidate.note,

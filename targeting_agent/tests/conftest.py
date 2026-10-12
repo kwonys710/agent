@@ -63,6 +63,8 @@ def discovery_config_18a5(config: Config, tmp_path) -> Config:
     """
     raw = {
         **config.raw,
+        # 이 테스트는 Discovery 자체를 본다 — Query Planner(19B)는 별도 테스트가 있다.
+        "query_planner": {"enabled": False},
         "browser_discovery": {
             "enabled": True,
             "headless": True,

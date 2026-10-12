@@ -105,6 +105,8 @@ def discovery_config(config: Config, tmp_path: Path) -> Config:
     """브라우저 Discovery를 켠 테스트 설정(경로는 모두 tmp_path 아래)."""
     raw = {
         **config.raw,
+        # 이 테스트는 Discovery 자체를 본다 — Query Planner(19B)는 별도 테스트가 있다.
+        "query_planner": {"enabled": False},
         "browser_discovery": {
             "enabled": True,
             "headless": True,

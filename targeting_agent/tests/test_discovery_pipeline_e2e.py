@@ -58,6 +58,8 @@ def three_query_browser() -> FakeBrowser:
 def e2e_config(config: Config) -> Config:
     raw = {
         **config.raw,
+        # 이 테스트는 Discovery 자체를 본다 — Query Planner(19B)는 별도 테스트가 있다.
+        "query_planner": {"enabled": False},
         "browser_discovery": {
             "enabled": True,
             "headless": True,

@@ -54,6 +54,7 @@ def autopilot_config(config: Config, *, autopilot: bool = False, **overrides) ->
             "require_score_for_comment": 20,
         },
         "executor": {**config.raw.get("executor", {}), "mode": "browser"},
+        "query_planner": {"enabled": False},
         "browser_discovery": {
             "enabled": True,
             "headless": True,
