@@ -378,3 +378,162 @@ def _loads(value: Any, default: Any = None) -> Any:
         return json.loads(value)
     except (json.JSONDecodeError, TypeError):
         return {} if default is None else default
+
+
+# --- Discovery Health (Phase 19K) ------------------------------------------
+# 19A~19E가 이미 집계한 값을 읽어 보여 주기만 한다. 비율 정의를 여기서 중복하지 않는다.
+# 표본이 없는 비율(Optional[float] = None)은 0%가 아니라 "-"로 표시한다.
+def _rate_text(value: Optional[float]) -> str:
+    """비율 표시. 표본이 없으면(None) 0%가 아니라 "-"."""
+    return "-" if value is None else f"{value * 100:.0f}%"
+
+
+def _score_text(value: Optional[float]) -> str:
+    return "-" if value is None else f"{float(value):.1f}"
+
+
+def discovery_health(
+    conn: sqlite3.Connection, *, recent_runs: int = 200, now: Any = None
+) -> dict[str, Any]:
+    """Query Bank / Planner / Novelty / Freshness 현황(읽기 전용).
+
+    `recent_runs`는 집계에 쓸 최근 query_runs 개수다(기본 200건).
+    """
+    from ..learning.operations import (
+        collect_freshness_metrics,
+        collect_novelty_metrics,
+        collect_query_metrics,
+        query_category_distribution,
+    )
+
+    query = collect_query_metrics(conn, recent_runs=recent_runs)
+    novelty = collect_novelty_metrics(conn)
+    freshness = collect_freshness_metrics(conn, now=now)
+    return {
+        "bank_size": query.bank_size,
+        "categories": query.categories,
+        "status": dict(query.status),
+        "never_run": query.never_run,
+        "avg_utility": query.avg_utility,
+        "avg_utility_text": "-" if query.avg_utility is None else f"{query.avg_utility:.2f}",
+        "last_batch": list(query.last_batch),
+        "runs": query.runs,
+        "queries_run": query.queries_run,
+        "failed_runs": query.failed_runs,
+        "found": query.found,
+        "collected": query.collected,
+        "new_candidates": query.new_candidates,
+        "duplicates": query.duplicates,
+        "unique_creators": query.unique_creators,
+        "new_rate": _rate_text(query.new_rate),
+        "duplicate_rate": _rate_text(query.duplicate_rate),
+        "unique_creator_rate": _rate_text(query.unique_creator_rate),
+        "categories_run": query_category_distribution(conn),
+        "novelty": {
+            "candidates": novelty.candidates,
+            "repeat_candidates": novelty.repeat_candidates,
+            "repeat_rate": _rate_text(novelty.repeat_rate),
+            "max_seen_count": novelty.max_seen_count,
+            "multi_query_candidates": novelty.multi_query_candidates,
+        },
+        "freshness": dict(freshness.bands),
+        "fresh_rate": _rate_text(freshness.fresh_rate),
+    }
+
+
+def query_performance(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
+    """검색어별 성과 행(Utility 내림차순). 표본이 없는 비율은 "-"로 돌려준다."""
+    from ..discovery.query_bank import list_queries
+
+    rows: list[dict[str, Any]] = []
+    for record in list_queries(conn, limit=limit):
+        rows.append(
+            {
+                "query": record.query,
+                "category": record.category,
+                "status": record.status.value,
+                "run_count": record.run_count,
+                "found": record.found_count,
+                "new": record.new_count,
+                "duplicate": record.duplicate_count,
+                "unique_creators": record.unique_creator_count,
+                "new_rate": _rate_text(record.new_rate),
+                "duplicate_rate": _rate_text(record.duplicate_rate),
+                "unique_creator_rate": _rate_text(record.unique_creator_rate),
+                "avg_score": _score_text(record.avg_target_score),
+                "score_75_rate": _rate_text(record.score_75_rate),
+                "score_82_rate": _rate_text(record.score_82_rate),
+                "utility": "-" if record.utility is None else f"{float(record.utility):.2f}",
+                "last_run_at": record.last_run_at or "-",
+            }
+        )
+    return rows
+
+
+def engagement_overview(conn: sqlite3.Connection, config: Any) -> dict[str, dict[str, int]]:
+    """LIKE / COMMENT 준비 상태(Phase 19K).
+
+    "eligible"은 **Action Policy의 추천 임계값**을 그대로 쓴다
+    (`actions.require_score_for_like` / `require_score_for_comment`).
+    Dashboard에 75/82 같은 숫자를 다시 적어 두지 않는다.
+    하한(`scoring.minimum_target_score`)은 적용하지 않는다 — 운영자가 설정한
+    임계값 기준으로 보여 주기 위함이다(자동 경로는 Policy가 하한을 지킨다).
+    """
+    from ..actions.policy import ActionPolicy
+
+    policy = ActionPolicy.from_config(config)
+    like_eligible = 0
+    comment_eligible = 0
+    for row in conn.execute(
+        "SELECT target_score FROM candidate_media WHERE target_score IS NOT NULL"
+    ).fetchall():
+        recommended = policy.recommend(row["target_score"], apply_minimum=False)
+        if ActionType.LIKE in recommended:
+            like_eligible += 1
+        if ActionType.COMMENT in recommended:
+            comment_eligible += 1
+
+    def queue_count(action_type: str, *extra: str) -> int:
+        sql = "SELECT COUNT(*) AS n FROM action_queue WHERE action_type = ?"
+        for clause in extra:
+            sql += f" AND {clause}"
+        return int(conn.execute(sql, (action_type,)).fetchone()["n"] or 0)
+
+    def interaction_count(action_type: str, *extra: str) -> int:
+        sql = "SELECT COUNT(*) AS n FROM interactions WHERE action_type = ?"
+        for clause in extra:
+            sql += f" AND {clause}"
+        return int(conn.execute(sql, (action_type,)).fetchone()["n"] or 0)
+
+    def draft_count(*extra: str) -> int:
+        sql = "SELECT COUNT(*) AS n FROM comment_drafts"
+        if extra:
+            sql += " WHERE " + " AND ".join(extra)
+        return int(conn.execute(sql).fetchone()["n"] or 0)
+
+    like = {
+        "eligible": like_eligible,
+        # 실행된 건수(Dry Run 포함) — Interaction 기록이 남은 것만 센다.
+        "executed": interaction_count("LIKE"),
+        "confirmed": interaction_count("LIKE", "success = 1", "dry_run = 0"),
+        # 실행 실패/보류는 품질이 아니라 실행 건강 신호다(18C.1과 같은 분류).
+        "blocked": queue_count("LIKE", "status IN ('FAILED', 'SKIPPED', 'CANCELLED')"),
+    }
+    comment = {
+        "eligible": comment_eligible,
+        "quality_pass": draft_count("quality_ok = 1"),
+        "quality_reject": draft_count("quality_ok = 0"),
+        "dry_run": interaction_count("COMMENT", "dry_run = 1"),
+        # 19G: 게시 확인까지 끝난 것만 confirmed로 센다.
+        "confirmed": interaction_count("COMMENT", "success = 1", "dry_run = 0"),
+        # 실제로 올렸지만 확인되지 않은 건(= 보냈다고 단정하지 않는다).
+        "unknown": interaction_count("COMMENT", "success = 0", "dry_run = 0"),
+    }
+    return {
+        "like": like,
+        "comment": comment,
+        "thresholds": {
+            "like": int(policy.like_threshold),
+            "comment": int(policy.comment_threshold),
+        },
+    }

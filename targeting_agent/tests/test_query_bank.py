@@ -413,3 +413,66 @@ def test_구간별_후보_수를_센다(conn: sqlite3.Connection):
     counts = freshness.freshness_summary(conn, now=NOW)
 
     assert counts == {"0-3일": 1, "4-7일": 1, "8-30일": 1, "30일+": 1}
+
+
+# --- 19D 교차 검색어 attribution (실기 리허설에서 발견한 누락) ----------------
+def test_여러_검색어가_같은_reel을_찾으면_모두_기록된다(
+    discovery_config_18a5: Config, conn: sqlite3.Connection
+):
+    """같은 Run 안에서도 후보 행은 하나, 검색어 attribution은 여러 개여야 한다.
+
+    이전 구현은 Run 내 중복을 상세 열기 전에 버리면서 attribution까지 잃었다.
+    """
+    from targeting_agent.discovery.browser_models import PostDetail
+    from targeting_agent.discovery.browser_runner import run_browser_discovery
+
+    from .test_browser_discovery import FakeBrowser, FakeProcessor
+
+    shared = "https://www.instagram.com/reel/SHARED01/"
+    queries = ["직장인", "퇴근", "회사생활"]
+    browser = FakeBrowser(
+        links={query: ["https://www.instagram.com/shared_creator/reel/SHARED01/"] for query in queries},
+        details={
+            shared: PostDetail(
+                permalink=shared,
+                username="shared_creator",
+                caption="퇴근 후 저녁 #직장인 #퇴근",
+                media_type="REEL",
+            )
+        },
+    )
+    seed_bank(conn)
+    # 검색어 성과 누적까지 보려면 Planner를 켜 둔다(fixture 기본값은 꺼져 있다).
+    raw = {**discovery_config_18a5.raw, "query_planner": {"enabled": True, "seed_on_start": False}}
+    cfg = Config(raw=raw, path=discovery_config_18a5.path, base_dir=discovery_config_18a5.base_dir)
+
+    result = run_browser_discovery(
+        cfg,
+        conn,
+        browser=browser,
+        queries=queries,
+        processor_factory=lambda cfg2, c: FakeProcessor(c),
+    )
+
+    assert result.added == 1  # 후보 행은 하나
+    assert conn.execute("SELECT COUNT(*) AS n FROM candidate_media").fetchone()["n"] == 1
+    media_pk = result.added_media_pks[0]
+    novelty = candidate_novelty(conn, media_pk)
+    assert sorted(novelty.queries) == sorted(queries)  # 검색어는 셋 다 기록된다
+    assert novelty.seen_count == 3
+    # 각 검색어의 성과에도 '찾았다'가 들어간다
+    assert all(get_query(conn, query).found_count >= 1 for query in queries)
+
+
+def test_utility는_포화되지_않고_순서를_보존한다(conn: sqlite3.Connection):
+    """성과가 매우 좋은 검색어들도 모두 1.0으로 뭉개지지 않아야 한다."""
+    seed_bank(conn)
+    run_query(conn, "퇴근", new=10, duplicates=0, creators=10, scores=[95.0, 90.0])
+    run_query(conn, "출근", new=10, duplicates=0, creators=5, scores=[70.0])
+
+    best = compute_utility(get_query(conn, "퇴근"))
+    good = compute_utility(get_query(conn, "출근"))
+
+    assert best is not None and good is not None
+    assert best > good  # 둘 다 1.0으로 포화되지 않는다
+    assert 0.0 <= good < best <= 1.0

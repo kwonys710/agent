@@ -72,6 +72,7 @@ form.inline{display:inline}
 .bars div{display:flex;gap:8px;align-items:center;font-size:12px;margin:2px 0}
 .bars span.n{width:92px;color:#555} .bars span.v{width:38px;text-align:right}
 .bar{height:7px;background:#d9e6ff;border-radius:4px}
+table.q{font-size:12px} table.q td.n{text-align:right}
 """
 
 
@@ -388,6 +389,98 @@ def _queue_tab(conn: sqlite3.Connection) -> str:
     )
 
 
+def _discovery_health(conn: sqlite3.Connection, config: Config) -> str:
+    """Discovery Health 블록(Phase 19K). 기존 화면을 재설계하지 않고 섹션만 덧붙인다.
+
+    표본이 없는 비율은 0%가 아니라 "-"로 표시한다(queries가 이미 그렇게 돌려준다).
+    """
+    health = queries.discovery_health(conn)
+    engagement = queries.engagement_overview(conn, config)
+    novelty = health["novelty"]
+    like = engagement["like"]
+    comment = engagement["comment"]
+    thresholds = engagement["thresholds"]
+
+    status = health["status"]
+    bank_cells = [
+        ("검색어 은행", f'{health["bank_size"]}개'),
+        ("카테고리", health["categories"]),
+        ("ACTIVE", status.get("ACTIVE", 0)),
+        ("EXPERIMENTAL", status.get("EXPERIMENTAL", 0)),
+        ("COOLDOWN", status.get("COOLDOWN", 0)),
+        ("DISABLED", status.get("DISABLED", 0)),
+        ("미사용 검색어", health["never_run"]),
+        ("평균 Utility", health["avg_utility_text"]),
+    ]
+    run_cells = [
+        ("검색어 실행", f'{health["runs"]}회'),
+        ("사용된 검색어", health["queries_run"]),
+        ("발견 / 수집", f'{health["found"]} / {health["collected"]}'),
+        ("신규 / 중복", f'{health["new_candidates"]} / {health["duplicates"]}'),
+        ("신규 비율", health["new_rate"]),
+        ("중복 비율", health["duplicate_rate"]),
+        ("신규 Creator 비율", health["unique_creator_rate"]),
+        ("반복 발견", f'{novelty["repeat_candidates"]} ({novelty["repeat_rate"]})'),
+        ("여러 검색어 발견", novelty["multi_query_candidates"]),
+    ]
+    fresh_cells = [(label, count) for label, count in health["freshness"].items()]
+    fresh_cells.append(("7일 이내 비율", health["fresh_rate"]))
+    engagement_cells = [
+        (f'LIKE 대상({thresholds["like"]}+)', like["eligible"]),
+        ("LIKE 실행", like["executed"]),
+        ("LIKE 확인", like["confirmed"]),
+        ("LIKE 실패/보류", like["blocked"]),
+        (f'COMMENT 대상({thresholds["comment"]}+)', comment["eligible"]),
+        ("댓글 품질 통과", comment["quality_pass"]),
+        ("댓글 품질 탈락", comment["quality_reject"]),
+        ("댓글 Dry Run", comment["dry_run"]),
+        ("댓글 게시 확인", comment["confirmed"]),
+        ("댓글 확인 불가", comment["unknown"]),
+    ]
+
+    def tiles(cells: Sequence[tuple[str, Any]]) -> str:
+        return "".join(f'<div class="stat">{e(k)}<b>{e(v)}</b></div>' for k, v in cells)
+
+    batch = ", ".join(health["last_batch"]) or "선택 기록 없음"
+    categories = (
+        ", ".join(f"{name} {count}" for name, count in health["categories_run"].items()) or "-"
+    )
+    return (
+        "<h2>Discovery Health</h2>"
+        f'<div class="grid">{tiles(bank_cells)}</div>'
+        f'<p class="muted">마지막 선택 묶음: {e(batch)} · 카테고리별 실행: {e(categories)}</p>'
+        f'<div class="grid">{tiles(run_cells)}</div>'
+        f'<div class="grid">{tiles(fresh_cells)}</div>'
+        f'<div class="grid">{tiles(engagement_cells)}</div>'
+        '<p class="muted">비율에 "-"가 보이면 표본이 없다는 뜻입니다(0%가 아닙니다). '
+        "LIKE/COMMENT 대상 수는 config의 추천 임계값을 그대로 씁니다.</p>"
+    )
+
+
+def _query_table(conn: sqlite3.Connection, limit: int = 20) -> str:
+    """검색어별 성과 표(Phase 19K). Utility 내림차순."""
+    rows = queries.query_performance(conn, limit=limit)
+    if not rows:
+        return '<h2>검색어 성과</h2><p class="muted">Query Bank가 비어 있습니다.</p>'
+    body = "".join(
+        f'<tr><td>{e(r["query"])}</td><td>{e(r["category"])}</td><td>{e(r["status"])}</td>'
+        f'<td class="n">{e(r["run_count"])}</td><td class="n">{e(r["found"])}</td>'
+        f'<td class="n">{e(r["new"])}</td><td class="n">{e(r["duplicate"])}</td>'
+        f'<td class="n">{e(r["unique_creators"])}</td><td class="n">{e(r["avg_score"])}</td>'
+        f'<td class="n">{e(r["score_75_rate"])}</td><td class="n">{e(r["score_82_rate"])}</td>'
+        f'<td class="n">{e(r["utility"])}</td><td>{e(r["last_run_at"])}</td></tr>'
+        for r in rows
+    )
+    return (
+        "<h2>검색어 성과</h2>"
+        '<table class="q"><tr><th>검색어</th><th>카테고리</th><th>상태</th><th>실행</th>'
+        "<th>발견</th><th>신규</th><th>중복</th><th>신규 Creator</th><th>평균 Score</th>"
+        f"<th>75+</th><th>82+</th><th>Utility</th><th>마지막 실행</th></tr>{body}</table>"
+        '<p class="muted">성과가 나쁜 검색어는 COOLDOWN으로 쉬게 합니다(영구 삭제 없음). '
+        "이 화면에서 검색어를 바꾸지 않습니다.</p>"
+    )
+
+
 def _stats_tab(conn: sqlite3.Connection, config: Config) -> str:
     data = queries.feedback_summary(conn)
     counts = "".join(
@@ -429,6 +522,8 @@ def _stats_tab(conn: sqlite3.Connection, config: Config) -> str:
         f"<h2>최근 Feedback</h2>{table}"
         '<p class="muted">응답 있음 / 팔로우됨은 현재 수동 입력입니다(자동 감지는 Phase 16 범위).</p>'
         f"{learning_html}"
+        # Phase 19K — 기존 섹션을 건드리지 않고 Discovery Health와 검색어 표를 뒤에 붙인다.
+        f"{_discovery_health(conn, config)}{_query_table(conn)}"
     )
 
 

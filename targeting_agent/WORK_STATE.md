@@ -1,6 +1,7 @@
 # Targeting Agent 작업 상태
 
-Current Phase: 18A.5 완료 (수집 파이프라인 Hotfix — 실기 재실행 대기)
+Version: v0.3.0
+Current Phase: 19A~19L 완료 (Multi-Agent Discovery & Engagement Upgrade)
 
 Completed:
 - Phase 1: 구조 / config.yaml / .env.example / SQLite / Logging
@@ -220,6 +221,39 @@ Phase 18A.5 완료: Candidate Collection Pipeline Hotfix
 - 오프라인 리허설: 링크 9 → Reel 7 → 수집 7 / username 86% / caption 86% / Claude 0 / 쓰기 0
 - Autopilot DRY_RUN 리허설: Queue LIKE 5·COMMENT 5 → 자동 승인 10 → 실행 성공 6·보류 4
   (보류는 creator_daily_limit), 실제 쓰기 0, 브라우저 미실행
+
+=== v0.3.0 / Phase 19 — Multi-Agent Discovery & Engagement Upgrade ===
+
+Completed: 19.0 19A 19B 19C 19D 19E 19F 19G 19H 19I 19J 19K 19L
+
+- 19A Query Bank: seed 70 / 카테고리 10, 검색어별 성과 집계, 삭제 대신 DISABLED
+- 19B Planner: 결정론적 utility(가중치는 config), 매 Run 6개(성과 70% + 탐색 30%),
+  직전 조합 회피, 중복↑/신규↓ → COOLDOWN, 성과 좋은 EXPERIMENTAL → ACTIVE
+- 19C Expansion: 고득점 후보 + 사람 Feedback에서 2-term 조합(결정론적, Claude 0),
+  주기 Batch만, 신규는 EXPERIMENTAL로 시작
+- 19D Novelty: first/last_seen_at·seen_count·candidate_queries,
+  같은 Run의 교차 검색어까지 attribution, 반복 발견은 metadata만(재분석·Action 0)
+- 19E Freshness: posted_at 기준 처리 우선순위(Target Score 불변)
+- 19F/19I Comment Engagement + Action Mix: 기존 comment_drafts 품질 통과분만 사용,
+  품질 실패는 LIKE만 남긴다, 임계값은 config single source
+- 19G Comment Verification: 게시 → 목록 확인 → reload 확인, UNKNOWN은 재시도 금지
+- 19H Activity Controller: NORMAL/CAUTION/STOPPED, **감소 방향만**,
+  STOPPED는 사람만 해제(--activity-reset)
+- 19J Scheduler: Trigger만 담당, 검색어 선택은 Planner(테스트로 고정)
+- 19K Dashboard: Discovery Health + 검색어 성과표 + Engagement(표본 없으면 "-")
+- 19L: v0_3_release_readiness_latest.html(DB 기준, LLM 0), --release-report
+
+schema v12(additive): query_bank / query_runs / candidate_queries +
+candidate_media(first_seen_at·last_seen_at·seen_count). 운영 DB 사본에서 v11→v12 검증.
+
+Tests: 566 passed (Phase 19 신규 101개)
+Last commit: Phase 19K/19L analytics + v0.3.0
+
+주의: 이 저장소에는 18D/18E/LIKE Canary가 없다(지시 전제와 다름). LIKE는 DRY_RUN 유지.
+
+Final runtime config: autopilot.enabled=false · browser_executor.mode=DRY_RUN ·
+actions.execution.dry_run=true · scheduler.autopilot=false · browser_discovery.enabled=false
+COMMENT: LIVE_READY (실제 공개 댓글은 Operator Gate)
 
 Next: 운영 관찰 / v0.3 검토
 Meta API: Optional (진행을 막지 않음)

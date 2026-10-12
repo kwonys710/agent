@@ -371,6 +371,8 @@ class InstagramBrowserDiscovery(DiscoverySource):
             SessionState.PLATFORM_WARNING: stop_on_warning,
         }
         self.stats = DiscoveryStats()
+        # 같은 Run에서 같은 Reel을 찾은 검색어들(§24: 후보 행은 하나, 검색어는 여러 개)
+        self._by_url: dict[str, RawCandidate] = {}
 
     def available(self) -> bool:
         return bool(self.queries)
@@ -498,6 +500,13 @@ class InstagramBrowserDiscovery(DiscoverySource):
             return None
         result.found += 1  # 여기까지 온 것만 '실제 Reel permalink'로 센다
         if normalized.canonical_url in seen:
+            # 이미 이번 Run에서 수집한 Reel이다. 상세를 다시 열지는 않지만,
+            # **이 검색어도 찾았다는 사실은 남긴다**(검색어 성과 attribution).
+            existing = self._by_url.get(normalized.canonical_url)
+            if existing is not None:
+                found_by = existing.extra.setdefault("found_by_queries", [])
+                if query not in found_by:
+                    found_by.append(query)
             result.skip(SKIP_DUPLICATE_IN_RUN)
             self._sample(result, link, skip=SKIP_DUPLICATE_IN_RUN)
             return None
@@ -530,6 +539,8 @@ class InstagramBrowserDiscovery(DiscoverySource):
         candidate.like_count = detail.like_count
         candidate.comment_count = detail.comment_count
         candidate.extra["source_query"] = query
+        candidate.extra["found_by_queries"] = [query]
+        self._by_url[normalized.canonical_url] = candidate
         self._sample(
             result,
             link,

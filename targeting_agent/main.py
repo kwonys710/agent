@@ -97,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scheduled Run(배치): inbox 처리 → 신규 후보 분석 → Daily Summary 생성",
     )
     parser.add_argument(
+        "--release-report",
+        action="store_true",
+        help="v0.3.0 릴리스 준비 상태 보고서를 생성한다(DB 기준, LLM 호출 없음)",
+    )
+    parser.add_argument(
         "--queries",
         action="store_true",
         help="Query Bank 현황과 검색어별 성과를 출력한다(Phase 19)",
@@ -477,6 +482,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.import_only:
         return run_import_only(config, args)
+
+    if args.release_report:
+        from .learning.release_report import (
+            build_release_readiness,
+            render_release_html,
+            write_release_report,
+        )
+
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            readiness = build_release_readiness(conn, config)
+            path = write_release_report(config, readiness, render_release_html(readiness))
+            print(f"릴리스 준비 보고서 생성: {path}")
+            for gate in readiness.gates:
+                print(f"  [남은 Gate] {gate}")
+            for note in readiness.notes:
+                print(f"  [경고] {note}")
+            return 0
+        finally:
+            conn.close()
 
     if args.queries:
         from .discovery.query_bank import list_queries

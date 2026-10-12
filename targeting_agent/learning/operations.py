@@ -282,3 +282,173 @@ def build_notes(report: OperationsReport, config: Config) -> list[str]:
     if executor.awaiting_approval >= int(config.get("dashboard.awaiting_warning", 20)):
         notes.append(f"승인 대기 Action이 {executor.awaiting_approval}건입니다 — Review가 밀려 있습니다.")
     return notes
+
+
+# --- Query Bank / Novelty / Freshness 지표 (Phase 19K) ----------------------
+# 19A~19E가 이미 계산해 둔 집계를 읽어 쓴다. 비율을 여기서 다시 정의하지 않는다
+# (QueryRecord의 property와 planner_summary / repeat_summary / freshness_summary가 원본).
+@dataclass
+class QueryMetrics:
+    """Query Bank 운영 지표(검색어 회전 건강)."""
+
+    bank_size: int = 0
+    categories: int = 0
+    never_run: int = 0
+    avg_utility: Optional[float] = None
+    status: dict[str, int] = field(default_factory=dict)
+    last_batch: list[str] = field(default_factory=list)
+    queries_run: int = 0
+    runs: int = 0
+    failed_runs: int = 0
+    found: int = 0
+    collected: int = 0
+    new_candidates: int = 0
+    duplicates: int = 0
+    unique_creators: int = 0
+
+    @property
+    def new_rate(self) -> Optional[float]:
+        return _ratio(self.new_candidates, self.new_candidates + self.duplicates)
+
+    @property
+    def duplicate_rate(self) -> Optional[float]:
+        return _ratio(self.duplicates, self.new_candidates + self.duplicates)
+
+    @property
+    def unique_creator_rate(self) -> Optional[float]:
+        return _ratio(self.unique_creators, self.new_candidates)
+
+    @property
+    def failure_rate(self) -> Optional[float]:
+        return _ratio(self.failed_runs, self.runs)
+
+    def as_rows(self) -> dict[str, str]:
+        status = " / ".join(f"{key} {self.status.get(key, 0)}" for key in sorted(self.status))
+        return {
+            "검색어 은행": f"{self.bank_size}개 (카테고리 {self.categories})",
+            "상태 분포": status or "-",
+            "한 번도 안 쓴 검색어": str(self.never_run),
+            "평균 Utility": "-" if self.avg_utility is None else f"{self.avg_utility:.2f}",
+            "마지막 선택 묶음": ", ".join(self.last_batch) or "-",
+            "검색어 실행": f"{self.runs}회 (검색어 {self.queries_run}개 / 실패 {self.failed_runs})",
+            "발견 / 수집": f"{self.found} / {self.collected}",
+            "신규 / 중복": (
+                f"{self.new_candidates} / {self.duplicates} "
+                f"(신규 {_pct(self.new_rate)} · 중복 {_pct(self.duplicate_rate)})"
+            ),
+            "신규 Creator 비율": f"{_pct(self.unique_creator_rate)} ({self.unique_creators}/{self.new_candidates})",
+        }
+
+
+@dataclass
+class NoveltyMetrics:
+    """반복 발견(Novelty) 지표. 반복 발견 자체는 정상이고, 재분석이 문제다."""
+
+    candidates: int = 0
+    repeat_candidates: int = 0
+    repeat_rate: Optional[float] = None
+    max_seen_count: int = 0
+    multi_query_candidates: int = 0
+
+    def as_rows(self) -> dict[str, str]:
+        return {
+            "후보 수": str(self.candidates),
+            "반복 발견 후보": f"{self.repeat_candidates} ({_pct(self.repeat_rate)})",
+            "최대 발견 횟수": str(self.max_seen_count),
+            "여러 검색어에서 발견": str(self.multi_query_candidates),
+        }
+
+
+@dataclass
+class FreshnessMetrics:
+    """게시 경과일 구간별 후보 수(처리 우선순위 분포)."""
+
+    bands: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def total(self) -> int:
+        return sum(self.bands.values())
+
+    @property
+    def fresh_rate(self) -> Optional[float]:
+        """7일 이내 후보 비율(표본이 없으면 None)."""
+        fresh = self.bands.get("0-3일", 0) + self.bands.get("4-7일", 0)
+        return _ratio(fresh, self.total)
+
+    def as_rows(self) -> dict[str, str]:
+        rows = {label: str(count) for label, count in self.bands.items()}
+        rows["7일 이내 비율"] = _pct(self.fresh_rate)
+        return rows
+
+
+def collect_query_metrics(
+    conn: sqlite3.Connection, *, recent_runs: Optional[int] = None, since: Optional[str] = None
+) -> QueryMetrics:
+    """Query Bank + query_runs를 집계한다(planner_summary를 그대로 재사용)."""
+    from ..discovery.query_planner import planner_summary
+
+    summary = planner_summary(conn)
+    metrics = QueryMetrics(
+        bank_size=int(summary.get("bank_size") or 0),
+        never_run=int(summary.get("never_run") or 0),
+        avg_utility=summary.get("avg_utility"),  # type: ignore[arg-type]
+        status=dict(summary.get("status") or {}),  # type: ignore[arg-type]
+        last_batch=list(summary.get("last_batch") or []),  # type: ignore[arg-type]
+        categories=_scalar(conn, "SELECT COUNT(DISTINCT category) FROM query_bank"),
+    )
+
+    # 최근 실행만 보려면 query_run_id 역순으로 자른다(기본은 전체).
+    where = "WHERE started_at >= ?" if since else ""
+    params: tuple[object, ...] = (since,) if since else ()
+    inner = f"SELECT * FROM query_runs {where} ORDER BY query_run_id DESC"
+    if recent_runs:
+        inner += f" LIMIT {int(recent_runs)}"
+    row = conn.execute(
+        "SELECT COUNT(*) AS runs, COUNT(DISTINCT query_id) AS queries_run, "
+        "       COALESCE(SUM(failed), 0) AS failed, COALESCE(SUM(found), 0) AS found, "
+        "       COALESCE(SUM(collected), 0) AS collected, "
+        "       COALESCE(SUM(new_candidates), 0) AS new_candidates, "
+        "       COALESCE(SUM(duplicates), 0) AS duplicates, "
+        "       COALESCE(SUM(unique_creators), 0) AS unique_creators "
+        f"FROM ({inner})",
+        params,
+    ).fetchone()
+    metrics.runs = int(row["runs"] or 0)
+    metrics.queries_run = int(row["queries_run"] or 0)
+    metrics.failed_runs = int(row["failed"] or 0)
+    metrics.found = int(row["found"] or 0)
+    metrics.collected = int(row["collected"] or 0)
+    metrics.new_candidates = int(row["new_candidates"] or 0)
+    metrics.duplicates = int(row["duplicates"] or 0)
+    metrics.unique_creators = int(row["unique_creators"] or 0)
+    return metrics
+
+
+def collect_novelty_metrics(conn: sqlite3.Connection) -> NoveltyMetrics:
+    """반복 발견 현황(19D의 repeat_summary를 그대로 쓴다)."""
+    from ..discovery.novelty import repeat_summary
+
+    summary = repeat_summary(conn)
+    return NoveltyMetrics(
+        candidates=int(summary.get("candidates") or 0),
+        repeat_candidates=int(summary.get("repeat_candidates") or 0),
+        repeat_rate=summary.get("repeat_rate"),  # type: ignore[arg-type]
+        max_seen_count=int(summary.get("max_seen_count") or 0),
+        multi_query_candidates=int(summary.get("multi_query_candidates") or 0),
+    )
+
+
+def collect_freshness_metrics(conn: sqlite3.Connection, *, now=None) -> FreshnessMetrics:
+    """구간별 후보 수(19E의 freshness_summary를 그대로 쓴다)."""
+    from ..discovery.freshness import freshness_summary
+
+    return FreshnessMetrics(bands=dict(freshness_summary(conn, now=now)))
+
+
+def query_category_distribution(conn: sqlite3.Connection) -> dict[str, int]:
+    """카테고리별 실행 횟수(검색어 다양성 확인용)."""
+    rows = conn.execute(
+        "SELECT category, COALESCE(SUM(run_count), 0) AS runs FROM query_bank "
+        "GROUP BY category HAVING runs > 0 ORDER BY runs DESC, category ASC"
+    ).fetchall()
+    return {str(row["category"]): int(row["runs"] or 0) for row in rows}

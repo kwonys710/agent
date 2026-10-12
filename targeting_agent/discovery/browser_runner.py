@@ -426,13 +426,22 @@ def _ingest(
     novelty = NoveltyStats()
     attribution: dict[str, dict[str, Any]] = {}
 
+    def bucket_of(name: str) -> dict[str, Any]:
+        return attribution.setdefault(
+            name,
+            {"found": 0, "collected": 0, "new": 0, "duplicate": 0, "creators": set(), "media_pks": []},
+        )
+
     for candidate in candidates:
         query = str(candidate.extra.get("source_query") or "")
-        bucket = attribution.setdefault(
-            query, {"found": 0, "collected": 0, "new": 0, "duplicate": 0, "creators": set(), "media_pks": []}
-        )
+        found_by = [str(q) for q in (candidate.extra.get("found_by_queries") or [query]) if q]
+        bucket = bucket_of(query)
         bucket["found"] += 1
         bucket["collected"] += 1
+        # 같은 Reel을 찾은 다른 검색어도 '찾았다'로 센다(수집은 한 번만 센다).
+        for other in found_by:
+            if other != query:
+                bucket_of(other)["found"] += 1
 
         item = ingestor.add_candidate(
             candidate,
@@ -451,15 +460,20 @@ def _ingest(
             bucket["duplicate"] += 1
 
         if item.media_pk is not None and item.result in (ADDED, DUPLICATE):
-            record = get_query(conn, query) if query else None
-            record_discovery(
-                conn,
-                int(item.media_pk),
-                query=query,
-                query_id=record.query_id if record else None,
-                is_new=is_new,
-                stats=novelty,
-            )
+            for index, other in enumerate(found_by):
+                record = get_query(conn, other) if other else None
+                record_discovery(
+                    conn,
+                    int(item.media_pk),
+                    query=other,
+                    query_id=record.query_id if record else None,
+                    # 첫 검색어만 '신규'다. 나머지는 같은 후보의 반복 발견이다.
+                    is_new=is_new and index == 0,
+                    stats=novelty,
+                )
+            if is_new:
+                for other in found_by[1:]:
+                    bucket_of(other)["duplicate"] += 1
     conn.commit()
 
     result.added = summary.added

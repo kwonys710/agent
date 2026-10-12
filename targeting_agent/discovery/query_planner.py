@@ -86,17 +86,22 @@ def compute_utility(
         return None
 
     total = 0.0
-    weight_sum = 0.0
+    positive = 0.0
+    negative = 0.0
     for key, value in parts.items():
         if value is None:
             continue
         weight = float(values.get(key, 0.0))
         total += weight * min(max(float(value), 0.0), 1.0)
-        weight_sum += abs(weight)
-    if not weight_sum:
+        # 이번에 쓸 수 있는 지표만으로 이론적 최대/최소를 만든다 → 포화 없이 순서가 보존된다.
+        if weight > 0:
+            positive += weight
+        else:
+            negative += weight
+    span = positive - negative
+    if span <= 0:
         return None
-    # 0~1로 정규화해 읽기 쉽게 만든다(음수 가중치 때문에 하한은 0으로 자른다).
-    return max(0.0, min(1.0, (total / weight_sum) + 0.5))
+    return round(max(0.0, min(1.0, (total - negative) / span)), 4)
 
 
 def refresh_utilities(conn: sqlite3.Connection, config: Config) -> int:
