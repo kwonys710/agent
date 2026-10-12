@@ -101,6 +101,8 @@ scoring:
     novelty: 0.05
 
 comments:
+  # Phase 19F: 같은 Creator에게 연속으로 댓글을 달지 않는다(0이면 사용하지 않음).
+  same_creator_cooldown_hours: 72
   enabled: true
   language: "ko"
   min_length: 5
@@ -205,6 +207,13 @@ autopilot:
     stale_minutes: 60
   summary:
     enabled: true
+
+activity:
+  # Phase 19H — 계정 건강 상태에 따른 활동 상한. **감소 방향으로만** 동작한다.
+  # 경고가 없다고 활동량을 자동으로 늘리지 않는다(상한은 actions.daily_limits가 천장).
+  caution_ratio: 0.5           # CAUTION이면 일일 상한을 이 비율로 줄인다
+  caution_recovery_hours: 24   # 조용한 기간이 지나면 CAUTION만 NORMAL로 복귀
+  # STOPPED(Challenge / Action Block / 로그인 필요)는 자동으로 풀리지 않는다 — 사람이 확인한다.
 
 browser_executor:
   # Phase 18B — 운영자가 로그인한 브라우저로 LIKE / COMMENT만 수행한다.

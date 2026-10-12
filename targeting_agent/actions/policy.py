@@ -95,6 +95,137 @@ class ActionPolicy:
         )
 
 
+# --- Comment Eligibility / Action Mix (Phase 19F·19I) ---------------------
+COMMENT_OK = "OK"
+COMMENT_BELOW_THRESHOLD = "below_comment_threshold"
+COMMENT_NO_CAPTION = "no_caption"
+COMMENT_NO_CANDIDATE = "no_comment_candidate"
+COMMENT_QUALITY_FAIL = "quality_fail"
+COMMENT_DUPLICATE = "duplicate_comment"
+COMMENT_DISABLED = "comment_disabled"
+COMMENT_RECENT_SAME_CREATOR = "recent_comment_same_creator"
+
+
+@dataclass
+class CommentEligibility:
+    """COMMENT 가능 여부. 실패해도 LIKE는 살린다(19I Action Mix)."""
+
+    ok: bool
+    reason: str = COMMENT_OK
+    draft_id: Optional[int] = None
+    text: Optional[str] = None
+
+    @property
+    def quality_pass(self) -> bool:
+        return self.ok
+
+
+def comment_eligibility(
+    conn: sqlite3.Connection,
+    config: Config,
+    media_pk: int,
+    score: Optional[float],
+    *,
+    policy: Optional[ActionPolicy] = None,
+) -> CommentEligibility:
+    """저장된 댓글 후보를 기준으로 COMMENT 가능 여부를 판단한다.
+
+    댓글을 **새로 만들지 않는다** — Phase 4의 생성·품질·중복 필터가 이미 통과시킨
+    comment_drafts만 본다(quality_ok=1). 기준 점수는 config가 single source다.
+    """
+    rules = policy or ActionPolicy.from_config(config)
+    if not rules.enable_comment:
+        return CommentEligibility(False, COMMENT_DISABLED)
+    if ActionType.COMMENT not in rules.recommend(score):
+        return CommentEligibility(False, COMMENT_BELOW_THRESHOLD)
+
+    media = conn.execute(
+        "SELECT caption, creator_id FROM candidate_media WHERE media_pk = ?", (int(media_pk),)
+    ).fetchone()
+    if media is None or not str(media["caption"] or "").strip():
+        # caption이 없으면 맥락 없는 댓글이 된다 → COMMENT 제외(LIKE는 가능).
+        return CommentEligibility(False, COMMENT_NO_CAPTION)
+
+    draft = conn.execute(
+        "SELECT draft_id, text FROM comment_drafts "
+        "WHERE media_pk = ? AND quality_ok = 1 AND status != 'REJECTED' "
+        "ORDER BY (status = 'SELECTED') DESC, COALESCE(similarity_max, 0) ASC, draft_id ASC "
+        "LIMIT 1",
+        (int(media_pk),),
+    ).fetchone()
+    if draft is None:
+        # 생성 실패/품질 탈락 구분: 후보 행이 아예 없으면 생성 실패로 본다.
+        any_draft = conn.execute(
+            "SELECT COUNT(*) AS n FROM comment_drafts WHERE media_pk = ?", (int(media_pk),)
+        ).fetchone()
+        reason = COMMENT_QUALITY_FAIL if int(any_draft["n"] or 0) else COMMENT_NO_CANDIDATE
+        return CommentEligibility(False, reason)
+
+    cooldown_hours = int(config.get("comments.same_creator_cooldown_hours", 0))
+    if cooldown_hours and _recent_creator_comment(conn, int(media["creator_id"]), cooldown_hours):
+        return CommentEligibility(False, COMMENT_RECENT_SAME_CREATOR)
+
+    return CommentEligibility(True, COMMENT_OK, int(draft["draft_id"]), str(draft["text"]))
+
+
+def _recent_creator_comment(conn: sqlite3.Connection, creator_id: int, hours: int) -> bool:
+    """같은 Creator에게 최근에 댓글을 달았는지(기존 interactions 기록만 본다)."""
+    row = conn.execute(
+        "SELECT 1 FROM interactions "
+        "WHERE creator_id = ? AND action_type = 'COMMENT' AND success = 1 AND dry_run = 0 "
+        "  AND executed_at >= datetime('now', ?) LIMIT 1",
+        (int(creator_id), f"-{int(hours)} hours"),
+    ).fetchone()
+    return row is not None
+
+
+@dataclass
+class ActionMix:
+    """후보 1건에 대해 실제로 만들 Action 조합(19I)."""
+
+    actions: tuple[ActionType, ...] = ()
+    comment: CommentEligibility = field(
+        default_factory=lambda: CommentEligibility(False, COMMENT_BELOW_THRESHOLD)
+    )
+    reason: str = ""
+
+    @property
+    def has_like(self) -> bool:
+        return ActionType.LIKE in self.actions
+
+    @property
+    def has_comment(self) -> bool:
+        return ActionType.COMMENT in self.actions
+
+
+def decide_action_mix(
+    conn: sqlite3.Connection,
+    config: Config,
+    media_pk: int,
+    score: Optional[float],
+    *,
+    policy: Optional[ActionPolicy] = None,
+) -> ActionMix:
+    """Score + Comment 품질로 Action 조합을 정한다.
+
+        Score < LIKE 기준                      → 없음
+        LIKE 기준 ≤ Score < COMMENT 기준       → LIKE
+        Score ≥ COMMENT 기준 + 댓글 품질 실패  → LIKE (댓글만 빼고 진행)
+        Score ≥ COMMENT 기준 + 댓글 품질 통과  → LIKE + COMMENT
+    """
+    rules = policy or ActionPolicy.from_config(config)
+    recommended = rules.recommend(score)
+    if not recommended:
+        return ActionMix((), CommentEligibility(False, COMMENT_BELOW_THRESHOLD), "below_threshold")
+
+    eligibility = comment_eligibility(conn, config, media_pk, score, policy=rules)
+    if ActionType.COMMENT in recommended and eligibility.ok:
+        return ActionMix((ActionType.LIKE, ActionType.COMMENT), eligibility, "like_and_comment")
+    if ActionType.COMMENT in recommended:
+        return ActionMix((ActionType.LIKE,), eligibility, f"like_only:{eligibility.reason}")
+    return ActionMix((ActionType.LIKE,), eligibility, "like_only")
+
+
 @dataclass
 class AutoApproveResult:
     """자동 승인 결과."""

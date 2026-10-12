@@ -21,7 +21,16 @@ from typing import Any, Callable, Optional
 
 from ..actions.controller import ActionController
 from ..actions.executors import create_executor
-from ..actions.policy import ActionPolicy, AutoApproveResult, RunMode, auto_approve, usage_note
+from ..actions.activity import ActivityState, ActivityStatus, effective_config, observe
+from ..actions.activity import status as activity_status
+from ..actions.policy import (
+    ActionPolicy,
+    AutoApproveResult,
+    RunMode,
+    auto_approve,
+    decide_action_mix,
+    usage_note,
+)
 from ..actions.queue import ActionQueueBuilder, QueueBuildResult, merge_results
 from ..actions.rate_limiter import RateLimiter
 from ..core.config import Config
@@ -79,6 +88,13 @@ class AutopilotResult:
     executed_failed: int = 0
     awaiting_approval: int = 0
     real_writes: int = 0
+    # Phase 19
+    activity_state: str = ActivityState.NORMAL.value
+    activity_reason: str = ""
+    comment_eligible: int = 0
+    comment_rejected: dict[str, int] = field(default_factory=dict)
+    expansion_added: list[str] = field(default_factory=list)
+    query_source: str = "config"
     errors: int = 0
     halted: bool = False
     halt_reason: str = ""
@@ -155,6 +171,7 @@ def run_autopilot(
             result.executor_mode,
         )
 
+        _stage_expansion(config, conn, result)
         _stage_discovery(config, conn, result, browser)
         _stage_inbox(config, conn, result)
         _stage_analyze(config, conn, result, processor_factory)
@@ -203,6 +220,23 @@ def run_autopilot(
 
 
 # --- 단계 ------------------------------------------------------------------
+def _stage_expansion(
+    config: Config, conn: sqlite3.Connection, result: AutopilotResult
+) -> None:
+    """Phase 19C: 주기적 Batch로 새 검색어 후보를 만든다(후보마다 호출하지 않는다)."""
+    if not bool(config.get("query_planner.expansion.enabled", True)):
+        result.note("expansion:skipped(설정)")
+        return
+    from ..discovery.query_expansion import expand_queries
+
+    plan = expand_queries(conn, config)
+    result.expansion_added = list(plan.added)
+    result.note(
+        f"expansion:{plan.status} 추가 {len(plan.added)}"
+        + (f" ({plan.message})" if plan.message else "")
+    )
+
+
 def _stage_discovery(
     config: Config, conn: sqlite3.Connection, result: AutopilotResult, browser: Optional[Any]
 ) -> None:
@@ -215,8 +249,13 @@ def _stage_discovery(
 
     discovery = run_browser_discovery(config, conn, browser=browser, process=False)
     result.discovery = discovery
-    result.note(f"discovery:{discovery.status} 신규 {discovery.added}")
+    result.query_source = discovery.query_source
+    result.note(
+        f"discovery:{discovery.status} 검색어 {len(discovery.planned_queries)}개"
+        f"({discovery.query_source}) 신규 {discovery.added} 반복 {discovery.repeat_candidates}"
+    )
     if discovery.status == "SESSION_STOPPED":
+        result.activity_state = observe(conn, discovery.stop_reason or "UNKNOWN").value
         raise BrowserSessionError(discovery.stop_reason or "UNKNOWN", discovery.message)
     result.errors += discovery.errors
 
@@ -286,11 +325,22 @@ def _stage_queue(config: Config, conn: sqlite3.Connection, result: AutopilotResu
         return
 
     builder = ActionQueueBuilder(config, result.run_id)
+    policy = ActionPolicy.from_config(config)
     outcomes: list[QueueBuildResult] = []
     for row in rows:
         media = dict(row)
         score = float(media.get("target_score") or 0)
-        draft_id, comment_text = _best_comment(conn, int(media["media_pk"]))
+        # Phase 19F/19I: 댓글 품질 Gate가 통과한 후보만 COMMENT를 받는다.
+        # 품질 실패는 LIKE만 남긴다(후보 전체를 버리지 않는다).
+        mix = decide_action_mix(conn, config, int(media["media_pk"]), score, policy=policy)
+        draft_id = mix.comment.draft_id if mix.has_comment else None
+        comment_text = mix.comment.text if mix.has_comment else None
+        if mix.has_comment:
+            result.comment_eligible += 1
+        elif mix.comment.reason:
+            result.comment_rejected[mix.comment.reason] = (
+                result.comment_rejected.get(mix.comment.reason, 0) + 1
+            )
         try:
             outcomes.append(
                 builder.build(conn, media, score, comment_draft_id=draft_id, comment_text=comment_text)
@@ -347,6 +397,22 @@ def _stage_execute(
         result.note("execute:skipped(설정)")
         return
 
+    # Phase 19H: 계정 건강 상태가 상한을 결정한다(감소 방향만).
+    activity = activity_status(conn, config)
+    result.activity_state = activity.state.value
+    result.activity_reason = activity.reason
+    if not activity.can_act:
+        result.note(f"execute:stopped({activity.state.value}:{activity.reason or '-'})")
+        logger.warning(
+            "Activity 상태가 %s 이므로 Action을 실행하지 않습니다(%s).",
+            activity.state.value,
+            activity.reason or "-",
+        )
+        return
+    config = effective_config(config, activity)
+    if activity.state is ActivityState.CAUTION:
+        result.note(f"execute:caution 상한 {activity.limits}")
+
     executor = create_executor(
         "browser",
         export_dir=config.export_dir,
@@ -367,6 +433,9 @@ def _stage_execute(
     if summary.halted:
         result.halt_reason = result.halt_reason or summary.halt_reason
         result.status = STATUS_STOPPED
+        # 플랫폼 신호는 활동 상태를 악화 방향으로만 바꾼다(자동 증가 없음).
+        signal = str(summary.halt_reason or "").split(":", 1)[0].strip().upper()
+        result.activity_state = observe(conn, signal).value
     result.real_writes = _count_real_writes(conn, result.run_id)
     result.note(
         f"execute:성공 {summary.success} / 보류 {summary.skipped} / 실패 {summary.failed}"
@@ -470,6 +539,14 @@ def format_result(result: AutopilotResult) -> str:
         f" 실행        : 성공 {result.executed_success} / 보류 {result.executed_skipped}"
         f" / 실패 {result.executed_failed}",
         f" 실제 쓰기   : {result.real_writes}",
+        f" 활동 상태   : {result.activity_state}"
+        + (f" ({result.activity_reason})" if result.activity_reason else ""),
+        f" COMMENT     : 가능 {result.comment_eligible}"
+        + (
+            " / 제외 " + ", ".join(f"{k}={v}" for k, v in sorted(result.comment_rejected.items()))
+            if result.comment_rejected
+            else ""
+        ),
         f" Claude      : {result.claude_calls}회 (Cache {result.cache_hits})",
         f" 오늘 사용량 : {result.usage or '-'}",
         f" 오류        : {result.errors}",

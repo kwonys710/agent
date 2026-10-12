@@ -97,6 +97,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scheduled Run(배치): inbox 처리 → 신규 후보 분석 → Daily Summary 생성",
     )
     parser.add_argument(
+        "--queries",
+        action="store_true",
+        help="Query Bank 현황과 검색어별 성과를 출력한다(Phase 19)",
+    )
+    parser.add_argument(
+        "--expand-queries",
+        action="store_true",
+        help="고득점 후보에서 새 검색어 후보를 만든다(EXPERIMENTAL로 추가)",
+    )
+    parser.add_argument(
+        "--activity-reset",
+        action="store_true",
+        help="활동 상태를 NORMAL로 되돌린다(STOPPED 해제는 운영자만 가능)",
+    )
+    parser.add_argument(
         "--weekly-report",
         action="store_true",
         help="최근 7일 운영 품질 보고서를 생성한다(DB 기준, LLM 호출 없음)",
@@ -462,6 +477,65 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.import_only:
         return run_import_only(config, args)
+
+    if args.queries:
+        from .discovery.query_bank import list_queries
+        from .discovery.query_planner import planner_summary
+
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            summary = planner_summary(conn)
+            print(f"[Query Bank] {summary['bank_size']}개 · {summary['status']}")
+            print(f"[직전 배치] {', '.join(summary['last_batch']) or '-'}")
+            print(f"[한 번도 안 쓴 검색어] {summary['never_run']}개")
+            print("")
+            print(f"{'검색어':<18}{'상태':<14}{'실행':>4}{'신규':>5}{'중복':>5}{'평균':>7}{'utility':>9}")
+            for record in list_queries(conn, limit=30):
+                average = record.avg_target_score
+                print(
+                    f"{record.query:<18}{record.status.value:<14}{record.run_count:>4}"
+                    f"{record.new_count:>5}{record.duplicate_count:>5}"
+                    f"{(f'{average:.1f}' if average is not None else '-'):>7}"
+                    f"{(f'{record.utility:.2f}' if record.utility is not None else '-'):>9}"
+                )
+            return 0
+        finally:
+            conn.close()
+
+    if args.expand_queries:
+        from .discovery.query_expansion import expand_queries
+
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            plan = expand_queries(conn, config, force=True)
+            print(f"[Query Expansion] {plan.status} — 출처 후보 {plan.sources}건")
+            if plan.message:
+                print(f"  {plan.message}")
+            for query in plan.added:
+                print(f"  + {query} (EXPERIMENTAL)")
+            for query, reason in list(plan.rejected.items())[:5]:
+                print(f"  - {query} ({reason})")
+            return 0
+        finally:
+            conn.close()
+
+    if args.activity_reset:
+        from .actions.activity import reset
+        from .actions.activity import status as activity_status
+
+        conn = get_connection(config.db_path)
+        try:
+            init_db(conn)
+            before = activity_status(conn, config)
+            reset(conn)
+            after = activity_status(conn, config)
+            print(f"[Activity] {before.state.value} → {after.state.value}")
+            print(f"  적용 상한: {after.limits}")
+            return 0
+        finally:
+            conn.close()
 
     if args.weekly_report:
         from .learning.weekly_report import (
