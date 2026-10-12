@@ -13,7 +13,7 @@
         <textarea aria-label="댓글 달기..."></textarea>
         <div role="button" id="submit">게시</div>
       </form>
-      <ul id="comments"></ul>
+      <ul id="comments" role="list" aria-label="댓글"></ul>
     </article>
   </main>
   <script>
@@ -25,12 +25,33 @@
     });
     const form = document.getElementById('comment-form');
     const box = form.querySelector('textarea');
+    const list = document.getElementById('comments');
+    // 정적 페이지는 reload하면 상태가 사라지므로, 게시한 댓글과 게시 클릭 수를
+    // sessionStorage에 남겨 두고 load마다 다시 그린다(영속성 확인 테스트용).
+    const STORE = 'reel_comments';
+    const CLICKS = 'reel_submit_clicks';
+    function saved() {
+      try { return JSON.parse(sessionStorage.getItem(STORE) || '[]'); } catch (e) { return []; }
+    }
+    function render() {
+      list.textContent = '';
+      for (const text of saved()) {
+        const li = document.createElement('li');
+        li.setAttribute('role', 'listitem');
+        li.textContent = text;
+        list.appendChild(li);
+      }
+    }
+    render();
     document.getElementById('submit').addEventListener('click', () => {
+      const clicks = Number(sessionStorage.getItem(CLICKS) || '0') + 1;
+      sessionStorage.setItem(CLICKS, String(clicks));
       if (!box.value.trim()) return;
-      const li = document.createElement('li');
-      li.textContent = box.value;
-      document.getElementById('comments').appendChild(li);
+      const all = saved();
+      all.push(box.value);
+      sessionStorage.setItem(STORE, JSON.stringify(all));
       box.value = '';
+      render();
     });
   </script>
 </body></html>

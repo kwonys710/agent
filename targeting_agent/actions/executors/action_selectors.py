@@ -47,6 +47,33 @@ COMMENT_SUBMIT: tuple[Entry, ...] = (
     ("submit_type", 'form button[type="submit"]'),
 )
 
+# --- COMMENT 확인(Phase 19G) ---------------------------------------------
+# 게시 후 "내 댓글이 실제로 목록에 보이는가"를 확인하기 위한 selector.
+# 모듈 최상단 상수 집합은 LIKE/COMMENT 4개 + 중단 문구로 고정되어 있으므로
+# (테스트가 그 집합을 그대로 검사한다) 확인용 selector는 클래스로 묶어 둔다.
+class CommentVerify:
+    """댓글 목록(LIST)과 댓글 항목(ITEMS). 해시 class / nth-child는 쓰지 않는다."""
+
+    # 댓글 스레드 컨테이너
+    LIST: tuple[Entry, ...] = (
+        ("list_aria_ko", 'ul[aria-label^="댓글"]'),
+        ("list_aria_en", 'ul[aria-label^="Comments"]'),
+        ("list_role_aria_ko", '[role="list"][aria-label^="댓글"]'),
+        ("list_role_aria_en", '[role="list"][aria-label^="Comments"]'),
+        ("list_next_to_form", "form ~ ul"),
+        ("list_in_article", "article ul"),
+    )
+    # 댓글 한 건(작성자 프로필 링크를 가진 항목이 실제 UI의 댓글이다)
+    ITEMS: tuple[Entry, ...] = (
+        ("item_aria_list_ko", 'ul[aria-label^="댓글"] > li'),
+        ("item_aria_list_en", 'ul[aria-label^="Comments"] > li'),
+        ("item_role_listitem", '[role="list"] [role="listitem"]'),
+        ("item_with_profile_link", 'ul li:has(a[role="link"][href^="/"])'),
+        ("item_next_to_form", "form ~ ul > li"),
+        ("item_in_article", "article ul > li"),
+    )
+
+
 # --- 중단 조건 -----------------------------------------------------------
 # 화면에 아래 문구가 보이면 Action Run 전체를 즉시 중단한다(우회하지 않는다).
 ACTION_BLOCKED_TEXTS = (

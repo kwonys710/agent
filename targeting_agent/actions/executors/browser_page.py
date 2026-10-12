@@ -36,6 +36,7 @@ from .action_selectors import (
     COMMENT_SUBMIT,
     LIKE_BUTTON,
     ACTION_BLOCKED_TEXTS,
+    CommentVerify,
     keys_of,
 )
 
@@ -43,6 +44,29 @@ logger = get_logger("actions.executor.browser_page")
 
 # 중단 사유(ACTION_BLOCKED는 세션 문제가 아니라 '지금 이 동작이 막힘'이다)
 STOP_ACTION_BLOCKED = "ACTION_BLOCKED"
+
+# 댓글 게시 결과(Phase 19G). "입력란이 비었다"는 약한 근거를 쓰지 않는다.
+COMMENT_CONFIRMED = "COMMENT_CONFIRMED"  # 목록에 보이고 reload 후에도 남아 있다
+COMMENT_NOT_SENT = "COMMENT_NOT_SENT"  # 입력란/게시 버튼이 없어 아무것도 올리지 않았다
+COMMENT_UNKNOWN_STATE = "COMMENT_UNKNOWN_STATE"  # 눌렀지만 확인 불가(재시도 금지)
+
+
+def normalize_comment_text(text: str) -> str:
+    """공백 차이는 무시한다(줄바꿈·연속 공백으로 DOM 표기가 달라지기 때문)."""
+    return " ".join((text or "").split())
+
+
+@dataclass(frozen=True)
+class CommentResult:
+    """댓글 게시 결과. state는 위 세 상수 중 하나, text는 **확인된** 댓글 문구다."""
+
+    state: str
+    text: str = ""
+    detail: str = ""
+
+    @property
+    def confirmed(self) -> bool:
+        return self.state == COMMENT_CONFIRMED
 
 
 class ActionPage(Protocol):
@@ -193,28 +217,71 @@ class PlaywrightActionPage:
         self._require_page().wait_for_timeout(min(self.selector_timeout_ms, 1500))
         return self.already_liked()
 
-    def comment(self, text: str) -> bool:
-        """댓글을 입력하고 게시한 것을 확인한다. 실패하면 재시도하지 않는다."""
+    def _find_own_comment(self, text: str) -> Optional[str]:
+        """댓글 목록에서 내가 쓴 문구를 찾는다(공백 정규화 후 '포함' 비교).
+
+        DOM 전체가 일치할 필요는 없다 — 실제 UI는 항목 안에 작성자/시간이 함께 들어간다.
+        단계 하나당 대기 예산(selector_timeout_ms)을 한 번만 쓴다.
+        """
+        page = self._require_page()
+        needle = normalize_comment_text(text)
+        if not needle:
+            return None
+        deadline = time.monotonic() + max(self.selector_timeout_ms, 200) / 1000
+        while True:
+            for key, selector in CommentVerify.ITEMS:
+                try:
+                    texts = page.locator(selector).all_inner_texts()
+                except Exception:  # noqa: BLE001 - 다음 후보 시도
+                    continue
+                for raw in texts:
+                    normalized = normalize_comment_text(raw)
+                    if needle in normalized:
+                        logger.debug("내 댓글 확인 key=%s", key)
+                        return normalized
+            if time.monotonic() >= deadline:
+                return None
+            page.wait_for_timeout(200)
+
+    def post_comment(self, text: str) -> CommentResult:
+        """댓글을 올리고 **목록에 보이는지 + reload 후에도 남아 있는지**로 확인한다.
+
+        게시 버튼은 단 한 번만 누른다. 확인에 실패하면 UNKNOWN_STATE로 남기고
+        절대 다시 올리지 않는다 — 공개된 중복 댓글이 '알 수 없음'보다 나쁘다.
+        """
+        page = self._require_page()
         box = self._find(COMMENT_INPUT)
         if box is None:
             logger.warning("댓글 입력란을 찾지 못했습니다(keys=%s)", ",".join(keys_of(COMMENT_INPUT)))
-            return False
+            return CommentResult(COMMENT_NOT_SENT, detail="input_not_found")
         box.click(timeout=self.selector_timeout_ms)
         box.fill(text, timeout=self.selector_timeout_ms)
 
         submit = self._find(COMMENT_SUBMIT)
         if submit is None:
             logger.warning("댓글 게시 버튼을 찾지 못했습니다(keys=%s)", ",".join(keys_of(COMMENT_SUBMIT)))
-            return False
-        submit.click(timeout=self.selector_timeout_ms)
-        self._require_page().wait_for_timeout(min(self.selector_timeout_ms, 1500))
+            return CommentResult(COMMENT_NOT_SENT, detail="submit_not_found")
+        submit.click(timeout=self.selector_timeout_ms)  # 재시도 없음(클릭 1회)
 
-        # 게시되면 입력란이 비워진다. 비워지지 않으면 실패로 본다(재시도 없음).
+        if self._find_own_comment(text) is None:
+            logger.warning("댓글을 게시했지만 목록에서 확인하지 못했습니다(재시도하지 않음)")
+            return CommentResult(COMMENT_UNKNOWN_STATE, detail="not_in_comment_list")
+
+        # reload 후에도 보이면 서버에 실제로 남은 것으로 본다(낙관적 UI 구분).
         try:
-            remaining = box.input_value(timeout=self.selector_timeout_ms)
-        except Exception:  # noqa: BLE001 - 입력란이 사라졌다면 게시된 것으로 본다
-            return True
-        return not (remaining or "").strip()
+            page.reload(wait_until="domcontentloaded", timeout=self.timeout_ms)
+        except Exception as exc:  # noqa: BLE001 - 새로고침 실패는 확인 불가로 처리
+            logger.warning("댓글 확인용 새로고침에 실패했습니다: %s", exc)
+            return CommentResult(COMMENT_UNKNOWN_STATE, detail="reload_failed")
+        persisted = self._find_own_comment(text)
+        if persisted is None:
+            logger.warning("새로고침 후 댓글이 남아 있지 않습니다(재시도하지 않음)")
+            return CommentResult(COMMENT_UNKNOWN_STATE, detail="not_persisted")
+        return CommentResult(COMMENT_CONFIRMED, text=persisted)
+
+    def comment(self, text: str) -> bool:
+        """기존 Executor 호환용 얇은 래퍼. 확인된 경우에만 True다."""
+        return self.post_comment(text).confirmed
 
     def close(self) -> None:
         for closer in (self._context, self._playwright):
