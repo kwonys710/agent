@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>Instagram</title></head>
+<body>
+  <nav aria-label="기본">
+    <a role="link" href="/"><svg aria-label="홈"></svg>홈</a>
+    <a role="link" href="#" id="search-entry"><svg aria-label="검색"></svg>검색</a>
+    <a role="link" href="/explore/">탐색</a>
+    <a href="/direct/inbox/">메시지</a>
+  </nav>
+  <main><article>피드</article></main>
+  <div id="search-panel" hidden>
+    <input placeholder="검색" aria-label="검색 입력">
+    <div id="results" hidden>
+      <div role="none"><a href="/explore/tags/%EC%A7%81%EC%9E%A5%EC%9D%B8/">#직장인</a></div>
+      <div role="none"><a role="link" href="/office_daily_kim/">office_daily_kim</a></div>
+    </div>
+  </div>
+  <script>
+    const entry = document.getElementById('search-entry');
+    const panel = document.getElementById('search-panel');
+    const input = panel.querySelector('input');
+    const results = document.getElementById('results');
+    entry.addEventListener('click', (e) => { e.preventDefault(); panel.hidden = false; });
+    input.addEventListener('input', () => { results.hidden = input.value.length === 0; });
+    results.addEventListener('click', (e) => {
+      const link = e.target.closest('a');
+      if (link) { e.preventDefault(); location.href = 'tag.html'; }
+    });
+  </script>
+</body></html>
