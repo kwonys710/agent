@@ -331,3 +331,24 @@ def test_resume은_사람_feedback을_만들지_않는다(
     resume_canary(conn=conn, config=resume_config, now=NOW, allow_discovery=False)
 
     assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == before
+
+
+def test_DB_연결이_실패해도_lock은_해제된다(resume_config: Config, tmp_path, monkeypatch):
+    """lock을 잡은 뒤 conn 생성이 실패하면 finally의 release에 도달해야 한다(L2).
+
+    release되지 않으면 다음 실행이 '소유자 없음 … 비정상 종료로 보고 인수' 경고를 거짓으로 낸다.
+    """
+    import json
+
+    from targeting_agent.canary import resume as resume_module
+
+    def broken(_path):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(resume_module, "get_connection", broken)
+
+    result = resume_canary(config=resume_config, now=NOW, allow_discovery=False)
+
+    assert result.step == STEP_BLOCKED and "OperationalError" in result.reason
+    lock_path = tmp_path / "data" / ".canary_resume.lock"
+    assert "released_at" in json.loads(lock_path.read_text(encoding="utf-8"))

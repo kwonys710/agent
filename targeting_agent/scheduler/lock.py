@@ -133,6 +133,9 @@ class SchedulerLock:
     _acquired: bool = False
     _fd: Optional[int] = None
     _mode: str = ""
+    # acquire 시점의 locker로 만든 unlock 수단 (함수, 모듈). 모듈 전역 _LOCKER를 release에서
+    # 다시 읽으면 acquire 때와 어긋날 수 있다. 폴백 claim은 쥔 락이 없어 None이다.
+    _unlock: Optional[tuple] = None
     _payload: dict = field(default_factory=dict)
 
     def acquire(self, now: Optional[datetime] = None) -> bool:
@@ -150,6 +153,7 @@ class SchedulerLock:
             raise self._io_error("lock 파일을 열지 못했습니다", exc) from exc
 
         keep = False
+        unlock: Optional[tuple] = None  # 이번 호출에서 락을 쥔 경우에만 채운다
         try:
             try:
                 # 고아 chromium 등 자식 프로세스가 락을 물고 있지 않게 한다.
@@ -160,48 +164,70 @@ class SchedulerLock:
             except OSError as exc:
                 raise self._io_error("lock 파일 초기화에 실패했습니다", exc) from exc
 
-            state, detail = self._try_lock(fd)
-            guarded = False  # 안전망을 거쳐 UNKNOWN이 됐는가(일반 TTL 폴백과 구분한다)
+            locker = _LOCKER  # acquire/release가 같은 locker를 쓰도록 한 번만 읽는다
+            state, detail = self._try_lock(fd, locker)
+            if state == OWNED:
+                unlock = (locker[1], locker[2])
+            # CONTENDED만 차단하고 UNKNOWN(locker 없음·EINVAL 등)은 TTL 폴백을 허용하는 것은 의도다.
+            # 방금 만든 파일의 CONTENDED는 '경쟁을 관찰했는데 소유자가 없다'는 모순이라 락 영역 오판이거나
+            # 초기화 중인 실행이므로 커널 락 없이 claim하지 않는다. UNKNOWN은 경쟁을 관찰한 적이 없고
+            # 락 미지원 환경의 TTL 판정은 설계된 동작이라, 최초 생성 때 건너뛸 이유가 없다.
             if state == CONTENDED and created:
-                # 방금 만든 파일을 정당하게 소유한 프로세스는 없다 → 락 영역 오판 신호.
-                # 여기서 막으면 매 실행이 조용히 LOCKED/exit 0 이 된다.
-                state = UNKNOWN
-                guarded = True
-                detail = f"방금 만든 lock 파일에서 락 충돌이 보고됨({detail}) — 락 영역 오판 의심"
+                # 방금 만든 파일을 정당하게 소유한 프로세스는 없다 → 락 영역 오판 신호이거나
+                # 다른 실행이 초기화 중이다. 어느 쪽이든 커널 락 없이 claim하지 않고 막는다
+                # (폴백 claim은 커널 락을 쥐지 않아 이후 실행이 2중 소유하게 된다).
+                logger.warning(
+                    "%s 방금 만든 lock 파일에서 락 충돌이 보고됨(%s) — 락 영역 오판 의심. "
+                    "커널 락 없이는 소유하지 않으므로 이번 실행은 건너뜁니다(lock=%s).",
+                    self.label, detail, self.path,
+                )
 
             if state == CONTENDED:
                 self._log_blocked(self._read(), now, mode=MODE_KERNEL)
                 return False
 
             if state == OWNED:
-                self._log_previous_owner(self._read(), now)
-                self._write_payload(fd, now)
+                held = self._read()
+                if (
+                    isinstance(held, dict)
+                    and held.get("mode") == MODE_TTL_FALLBACK
+                    and not self._is_stale(held, now)
+                ):
+                    # 이전 소유자는 커널 락 없이 TTL 폴백으로 claim했다. 락이 비어 있어도
+                    # 그가 살아 있는지 커널은 모른다 → TTL 규칙으로 보호한다(회귀 방지).
+                    self._log_blocked(held, now, mode=MODE_TTL_FALLBACK)
+                    return False
+                self._log_previous_owner(held, now)
+                self._write_payload(fd, now, mode=MODE_KERNEL)
                 self._mode = MODE_KERNEL
                 logger.info(
                     "%s lock 획득 mode=%s pid=%d lock=%s",
                     self.label, MODE_KERNEL, os.getpid(), self.path,
                 )
             else:
-                if not self._fallback_claim(fd, now, detail, guarded=guarded):
+                if not self._fallback_claim(fd, now, detail):
                     return False
                 self._mode = MODE_TTL_FALLBACK
 
             self._fd = fd
+            self._unlock = unlock
             self._acquired = True
             keep = True
             return True
         finally:
             if not keep:
-                os.close(fd)  # 닫으면 커널 락도 함께 풀린다
+                self._do_unlock(fd, unlock)
+                os.close(fd)
 
     def release(self) -> None:
         """정상·비정상 종료 모두에서 호출된다. 멱등. 파일은 지우지 않는다."""
         if not self.enabled or not self._acquired or self._fd is None:
             return
         fd, self._fd = self._fd, None
+        unlock, self._unlock = self._unlock, None
         self._acquired = False
         try:
-            # 반드시 unlock 전에 쓴다. 풀린 뒤에 쓰면 새 소유자의 기록을 덮어쓴다.
+            # 반드시 락이 풀리기(close) 전에 쓴다. 풀린 뒤에 쓰면 새 소유자의 기록을 덮어쓴다.
             released = {
                 **self._payload,
                 "released_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -210,13 +236,10 @@ class SchedulerLock:
         except OSError:  # pragma: no cover - 파일 잠김 등
             logger.warning("lock 해제 기록을 쓰지 못했습니다: %s", self.path)
         finally:
-            try:
-                if self._mode == MODE_KERNEL and _LOCKER is not None:
-                    _LOCKER[1](fd, _LOCKER[2])
-            except Exception:  # pragma: no cover - close가 어차피 푼다
-                logger.warning("lock unlock 호출이 실패했습니다(close로 해제): %s", self.path)
-            finally:
-                os.close(fd)
+            # 명시적 unlock이 먼저다(Windows는 close만으로 풀리는 시점이 보장되지 않는다).
+            # unlock 실패가 close를 막으면 fd를 쥔 채 끝난다.
+            self._do_unlock(fd, unlock)
+            os.close(fd)
 
     # --- 내부 ------------------------------------------------------------
     def _io_error(self, what: str, exc: OSError) -> LockIOError:
@@ -224,21 +247,37 @@ class SchedulerLock:
         return LockIOError(f"{what}: {self.path}: {exc}")
 
     @staticmethod
-    def _try_lock(fd: int) -> tuple[str, str]:
-        if _LOCKER is None:
+    def _try_lock(fd: int, locker: Optional[tuple]) -> tuple[str, str]:
+        if locker is None:
             return UNKNOWN, "락 API 없음(fcntl·msvcrt 모두 없음)"
         try:
-            return _LOCKER[0](fd, _LOCKER[2])
+            return locker[0](fd, locker[2])
         except Exception as exc:  # 예상 밖 예외도 판정 불가로 본다
             return UNKNOWN, f"예상 밖 예외 {exc!r}"
 
-    def _write_payload(self, fd: int, now: Optional[datetime] = None, payload: Optional[dict] = None) -> None:
+    def _do_unlock(self, fd: int, unlock: Optional[tuple]) -> None:
+        if unlock is None:
+            return  # 폴백 claim 등 쥔 락이 없다
+        try:
+            unlock[0](fd, unlock[1])
+        except Exception:  # close가 어차피 푼다 — 여기서 막지 않는다
+            logger.warning("lock unlock 호출이 실패했습니다(close로 해제): %s", self.path)
+
+    def _write_payload(
+        self,
+        fd: int,
+        now: Optional[datetime] = None,
+        payload: Optional[dict] = None,
+        mode: str = "",
+    ) -> None:
         """offset 0부터 `" " + JSON` 을 쓰고 자른다. 선두 공백은 Windows 락 바이트다."""
         if payload is None:
             payload = {
                 "pid": os.getpid(),
                 "created_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
                 "label": self.label,
+                # 소유 방식을 남긴다. TTL_FALLBACK 소유자는 커널 락이 없어 다음 실행이 알아야 한다.
+                "mode": mode,
             }
             self._payload = payload
         data = b" " + json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -251,13 +290,8 @@ class SchedulerLock:
         except OSError as exc:
             raise self._io_error("lock 기록을 쓰지 못했습니다", exc) from exc
 
-    def _fallback_claim(self, fd: int, now: datetime, reason: str, *, guarded: bool = False) -> bool:
-        """락 판정이 불가능할 때만: 예전 TTL 판정. True면 기록까지 마쳤다.
-
-        guarded=True(방금 만든 파일에서 충돌이 보고된 경우)에는 기록이 없거나 읽을 수 없을 때
-        회수하지 않는다. 다른 실행이 막 락을 잡고 payload를 쓰기 전일 수 있어, 회수하면 2중 실행이다.
-        한 번 건너뛰는 쪽이 안전하다.
-        """
+    def _fallback_claim(self, fd: int, now: datetime, reason: str) -> bool:
+        """락 판정이 불가능할 때만: 예전 TTL 판정. True면 기록까지 마쳤다."""
         logger.warning(
             "%s lock 기반 판정 비활성 mode=%s reason=%s — TTL(%d분) 판정으로 폴백합니다.",
             self.label, MODE_TTL_FALLBACK, reason, self.stale_minutes,
@@ -265,16 +299,6 @@ class SchedulerLock:
         held = self._read()
         if held is UNREADABLE:
             self._log_blocked(held, now, mode=MODE_TTL_FALLBACK)
-            return False
-        if guarded and (
-            held is None or (held.get("pid") is None and not held.get("created_at"))
-        ):
-            logger.warning(
-                "%s lock 소유자 기록이 비어 있습니다 — 다른 실행이 초기화 중인 것으로 보여 "
-                "이번 실행은 건너뜁니다(lock=%s). 이 로그가 매번 반복되면 파일시스템의 락 보고가 "
-                "잘못된 것입니다. lock 파일을 지우지 마십시오.",
-                self.label, self.path,
-            )
             return False
         if held is not None:
             if self._is_stale(held, now):
@@ -286,7 +310,7 @@ class SchedulerLock:
             else:
                 self._log_blocked(held, now, mode=MODE_TTL_FALLBACK)
                 return False
-        self._write_payload(fd, now)
+        self._write_payload(fd, now, mode=MODE_TTL_FALLBACK)
         return True
 
     def _log_previous_owner(self, held: Any, now: datetime) -> None:
@@ -307,7 +331,7 @@ class SchedulerLock:
             "프로세스를 종료하면 즉시 해제됩니다. "
             "lock 파일을 지우지 마십시오(지우면 두 실행이 동시에 돌 수 있습니다)."
             if mode == MODE_KERNEL
-            else f"락 판정이 꺼져 있어 TTL({self.stale_minutes}분) 경과 후 자동 회수됩니다. "
+            else f"커널 락 없이(TTL 판정) 소유된 lock이라 TTL({self.stale_minutes}분) 경과 후 자동 회수됩니다. "
             "lock 파일을 지우지 마십시오(지우면 두 실행이 동시에 돌 수 있습니다)."
         )
         if held is UNREADABLE:
@@ -318,6 +342,19 @@ class SchedulerLock:
             )
             return
         held = held or {}
+        if mode == MODE_KERNEL and held.get("pid") is None and not held.get("created_at"):
+            # 락은 충돌인데 소유자 기록이 비어 있다. 정상 소유자라면 자리바이트와 payload 사이
+            # 수 마이크로초에만 보이는 상태다. 반복되면 FS의 락 보고 오류다. 종료할 pid가 없으므로
+            # '프로세스를 종료하라'고 하지 않고, 운영자가 실제로 할 수 있는 행동을 적는다.
+            logger.warning(
+                "다른 %s이 락을 쥐고 있다고 보고되지만 소유자 기록이 비어 있습니다(lock=%s, mode=%s). "
+                "초기화 중인 정상 실행이면 곧 사라지는 일시 상태입니다. 이 로그가 실행마다 반복되면 "
+                "파일시스템의 락 보고 오류일 가능성이 높습니다 — 실행 중인 %s 프로세스가 없는지 "
+                "확인하고, 없는데 반복되면 lock 경로를 락을 지원하는 로컬 디스크로 옮기도록 운영자에게 "
+                "알리십시오. lock 파일을 지우지 마십시오(지우면 두 실행이 동시에 돌 수 있습니다).",
+                self.label, self.path, mode, self.label,
+            )
+            return
         age = self._age_seconds(held, now)
         too_long = age is not None and age >= max(self.stale_minutes, 1) * 60
         if too_long and mode == MODE_KERNEL:
@@ -375,10 +412,14 @@ class SchedulerLock:
             data = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             # 자리바이트 없는 예전 형식(`{...}`)은 offset 1에서 첫 글자가 잘린다. 전체를 다시 본다.
-            # 여기서의 OSError(Windows 락 바이트)는 '읽을 수 없음'이 아니라 '해석 불가'로 둔다.
+            # 예전 형식 파일은 offset 0 읽기가 실패하지 않으므로, 여기서의 OSError는 바이트 0에
+            # mandatory lock이 걸려 있다(= 소유자가 살아 있다)는 뜻이다. '깨진 기록'(stale)이 아니라
+            # UNREADABLE로 돌려 폴백이 회수하지 않게 한다.
             try:
                 data = json.loads(_read_bytes(self.path, 0).decode("utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            except OSError:
+                return UNREADABLE
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 return {"pid": None, "created_at": None}  # 깨진 lock: 폴백에서는 stale로 취급
         return data if isinstance(data, dict) else {}
 

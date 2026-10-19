@@ -385,8 +385,6 @@ def test_락_소유자가_없으면_신선한_기록이어도_회수한다(conn,
 
 def _assert_released_not_deleted(path: Path) -> None:
     """해제 후에도 파일은 남고(unlink 금지: inode 동일성) released_at 이 있으며 다시 잡을 수 있다."""
-    import json
-
     assert path.exists()
     assert "released_at" in json.loads(path.read_text(encoding="utf-8"))
     again = SchedulerLock(path=path, stale_minutes=60)
@@ -530,7 +528,7 @@ import logging
 import os
 import subprocess
 import sys
-import time
+import threading
 
 from targeting_agent.scheduler import lock as lockmod
 
@@ -557,7 +555,13 @@ def _holder(path: Path, label: str = "Holder", stale_minutes: int = 60):
         text=True,
     )
     try:
-        line = proc.stdout.readline().strip()
+        # 자식이 출력 전에 멈춰도 테스트가 무한 대기하지 않게 한다(finally에서 kill하면 EOF로 풀린다).
+        box: list[str] = []
+        reader = threading.Thread(target=lambda: box.append(proc.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(timeout=30)
+        assert box, "자식이 30초 안에 락 획득 결과를 출력하지 않았다"
+        line = box[0].strip()
         assert line == f"READY {proc.pid}", f"자식이 락을 잡지 못했다: {line!r}"
         yield proc
     finally:
@@ -683,6 +687,8 @@ def test_T7_fd는_상속되지_않아_자식_프로세스가_락을_물지_않�
     assert os.get_inheritable(lock._fd) is False
 
     # POSIX에서는 close_fds=False 로 띄워 '상속 가능 여부'만이 결과를 가르게 한다.
+    # 주의: Windows에서는 redirect 없는 close_fds=False 가 기본과 같아, 이 테스트는
+    # get_inheritable 단정만 검증한다(자식 프로세스 상속 검증은 POSIX에서만 유효하다).
     extra = {"close_fds": False} if os.name == "posix" else {}
     orphan = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"], **extra
@@ -755,6 +761,26 @@ def test_읽기는_항상_offset_1을_먼저_시도하고_예전_형식만_전�
     assert offsets == [1, 0]                                 # 예전 형식: offset 1 실패 후 전체
 
 
+def test_M1_offset_1은_읽히는데_전체_읽기가_OSError면_깨진_기록이_아니라_UNREADABLE이다(tmp_path, monkeypatch):
+    """그 조합의 현실적 원인은 '바이트 0 mandatory lock = 소유자 생존'뿐이다. stale로 보면 회수한다."""
+    path = tmp_path / ".scheduler.lock"
+    path.write_bytes(b" ")                                  # 소유자가 자리바이트만 쓴 상태
+    real = lockmod._read_bytes
+
+    def mandatory(p, offset):
+        if offset == 0:
+            raise PermissionError("lock violation")
+        return real(p, offset)
+
+    monkeypatch.setattr(lockmod, "_read_bytes", mandatory)
+    assert SchedulerLock(path=path)._read() is lockmod.UNREADABLE
+    # 폴백(UNKNOWN)이 이 상태를 만나도 회수하지 않는다.
+    monkeypatch.setattr(lockmod, "_LOCKER", None)
+    assert SchedulerLock(path=path, stale_minutes=60).acquire() is False
+    monkeypatch.undo()
+    assert path.read_bytes() == b" "
+
+
 def test_예전_형식_lock_파일도_pid를_읽는다(tmp_path):
     """자리바이트 없는 예전 `{...}` 파일은 offset 1에서 첫 글자가 잘리므로 전체를 다시 읽는다."""
     path = tmp_path / ".scheduler.lock"
@@ -799,6 +825,48 @@ def test_T9_Windows_분기_정상_획득은_바이트0을_1바이트_NBLCK으로
     assert fake.calls == [(FakeMsvcrt.LK_NBLCK, 1, 0)]
     lock.release()
     assert fake.calls[-1] == (FakeMsvcrt.LK_UNLCK, 1, 0)
+    assert lock._fd is None and "released_at" in _payload(tmp_path / ".scheduler.lock")
+
+
+def test_release는_acquire_시점의_locker로_unlock한다(tmp_path, monkeypatch):
+    """release에서 모듈 전역 locker를 다시 읽으면 acquire 때와 어긋난다(결합 회귀 방지)."""
+    first, other = FakeMsvcrt(), FakeMsvcrt()
+    _use_windows_locker(monkeypatch, first)
+    lock = SchedulerLock(path=tmp_path / ".scheduler.lock")
+    assert lock.acquire() is True
+    _use_windows_locker(monkeypatch, other)          # acquire 이후 전역이 바뀐다
+    lock.release()
+    assert first.calls[-1] == (FakeMsvcrt.LK_UNLCK, 1, 0)
+    assert other.calls == []
+    monkeypatch.setattr(lockmod, "_LOCKER", None)    # 전역이 사라져도 release는 깨지지 않는다
+    again = SchedulerLock(path=tmp_path / "b.lock")
+    assert again.acquire() is True
+    again.release()
+
+
+def test_unlock이_실패해도_close는_수행되고_폴백_claim은_unlock하지_않는다(tmp_path, monkeypatch):
+    import errno
+
+    class BrokenUnlock(FakeMsvcrt):
+        def locking(self, fd, mode, nbytes):
+            if mode == self.LK_UNLCK:
+                raise OSError(errno.EBADF, "unlock failed")
+            super().locking(fd, mode, nbytes)
+
+    _use_windows_locker(monkeypatch, BrokenUnlock())
+    lock = SchedulerLock(path=tmp_path / ".scheduler.lock")
+    assert lock.acquire() is True
+    fd = lock._fd
+    lock.release()
+    with pytest.raises(OSError):
+        os.fstat(fd)                                 # fd가 닫혔다
+
+    fallback = FakeMsvcrt(fail_errno=errno.EINVAL)
+    _use_windows_locker(monkeypatch, fallback)
+    claimed = SchedulerLock(path=tmp_path / "fb.lock")
+    assert claimed.acquire() is True and claimed._unlock is None
+    claimed.release()
+    assert all(call[0] != FakeMsvcrt.LK_UNLCK for call in fallback.calls)   # 쥔 락이 없다
 
 
 def test_T9_Windows_분기_EACCES는_차단이고_TTL이_지나도_회수하지_않는다(tmp_path, monkeypatch, caplog):
@@ -828,9 +896,9 @@ def test_T9_Windows_분기_EINVAL은_UNKNOWN이라_TTL_폴백한다(tmp_path, mo
     assert "released_at" in _payload(path)
 
 
-def test_T9_방금_만든_파일에서_충돌이_보고되고_기록이_비어_있으면_차단한다(tmp_path, monkeypatch, caplog):
-    """방금 만든 파일에서 충돌 = 락 영역 오판 신호(UNKNOWN). 그래도 기록이 비어 있으면
-    다른 실행이 초기화 중일 수 있으므로 회수하지 않고 건너뛴다(2중 실행 방지)."""
+def test_T9_방금_만든_파일에서_충돌이_보고되면_빈_기록이어도_claim하지_않고_차단한다(tmp_path, monkeypatch, caplog):
+    """방금 만든 파일에서 충돌 = 락 영역 오판 신호이거나 다른 실행이 초기화 중이다.
+    어느 쪽이든 커널 락 없이 claim하면 안 된다(이후 실행이 2중 소유한다)."""
     import errno
 
     _use_windows_locker(monkeypatch, FakeMsvcrt(fail_errno=errno.EACCES))
@@ -840,8 +908,7 @@ def test_T9_방금_만든_파일에서_충돌이_보고되고_기록이_비어_�
         lock = SchedulerLock(path=path)
         assert lock.acquire() is False
     assert path.read_bytes() == b" "                          # 자리바이트뿐, 덮어쓰지 않았다
-    assert "mode=TTL_FALLBACK" in caplog.text and "락 영역 오판" in caplog.text
-    assert "초기화 중인 것으로 보여 이번 실행은 건너뜁니다" in caplog.text
+    assert "락 영역 오판" in caplog.text and "이번 실행은 건너뜁니다" in caplog.text
     assert lock._fd is None and lock._acquired is False
 
 
@@ -858,26 +925,77 @@ def _contended_after_writing(record: dict):
     return (lock, lambda fd, mod: None, None)
 
 
-def test_T9_방금_만든_파일이어도_기록이_있으면_일반_TTL_폴백_의미를_따른다(tmp_path, monkeypatch):
-    now = datetime.now(timezone.utc)
-    fresh = tmp_path / "fresh.lock"
-    monkeypatch.setattr(
-        lockmod, "_LOCKER",
-        _contended_after_writing({"pid": 4242, "created_at": now.isoformat(timespec="seconds")}),
-    )
-    assert SchedulerLock(path=fresh, stale_minutes=60).acquire() is False   # 신선한 기록 → 차단
+def test_T9_방금_만든_파일에서_충돌이_보고되면_기록이_있어도_커널_락_없이_claim하지_않는다(tmp_path, monkeypatch):
+    """released_at 기록을 본 쪽이 커널 락 없이 claim하면 뒤 실행(KERNEL)과 동시에 돈다(L1)."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for name, record in {
+        "fresh": {"pid": 4242, "created_at": now},
+        "released": {"pid": 4242, "created_at": now, "released_at": now},
+    }.items():
+        monkeypatch.setattr(lockmod, "_LOCKER", _contended_after_writing(record))
+        path = tmp_path / f"{name}.lock"
+        assert SchedulerLock(path=path, stale_minutes=60).acquire() is False, name
+        assert _payload(path) == record                      # 기록을 덮어쓰지 않았다
 
-    released = tmp_path / "released.lock"
-    monkeypatch.setattr(
-        lockmod, "_LOCKER",
-        _contended_after_writing(
-            {"pid": 4242, "created_at": now.isoformat(timespec="seconds"),
-             "released_at": now.isoformat(timespec="seconds")}
-        ),
-    )
-    lock = SchedulerLock(path=released, stale_minutes=60)
-    assert lock.acquire() is True                                           # 해제된 기록 → 인수
+
+def test_H1_TTL_폴백으로_claim한_실행이_있으면_뒤따르는_KERNEL_실행은_차단된다(tmp_path, monkeypatch, caplog):
+    """폴백 claim자는 커널 락을 쥐지 않는다. 기록에 mode를 남겨 다음 실행이 TTL로 보호한다."""
+    import errno
+
+    path = tmp_path / ".scheduler.lock"
+    real_locker = lockmod._LOCKER
+    _use_windows_locker(monkeypatch, FakeMsvcrt(fail_errno=errno.EINVAL))   # 일시적 락 오류
+    a = SchedulerLock(path=path, stale_minutes=60, label="Holder")
+    assert a.acquire() is True and a._mode == lockmod.MODE_TTL_FALLBACK
+    assert _payload(path)["mode"] == lockmod.MODE_TTL_FALLBACK
+
+    monkeypatch.setattr(lockmod, "_LOCKER", real_locker)                    # 락이 정상으로 돌아옴
+    with caplog.at_level(logging.INFO):
+        b = SchedulerLock(path=path, stale_minutes=60, label="Holder")
+        assert b.acquire() is False                          # 구버전처럼 신선한 기록 앞에서 차단
+    assert _payload(path)["pid"] == os.getpid() and "released_at" not in _payload(path)
+    assert "TTL" in caplog.text and "지우지 마십시오" in caplog.text
+
+    a.release()                                              # 정상 해제되면 바로 인수된다
+    c = SchedulerLock(path=path, stale_minutes=60)
+    assert c.acquire() is True and c._mode == lockmod.MODE_KERNEL
+    assert _payload(path)["mode"] == lockmod.MODE_KERNEL
+    c.release()
+
+
+def test_H1_폴백_기록이_TTL을_넘기면_KERNEL_실행이_인수한다(tmp_path):
+    path = tmp_path / ".scheduler.lock"
+    _write_record(path, timedelta(hours=3), mode=lockmod.MODE_TTL_FALLBACK)
+    lock = SchedulerLock(path=path, stale_minutes=60)
+    assert lock.acquire() is True and lock._mode == lockmod.MODE_KERNEL
     lock.release()
+
+
+def test_H1_KERNEL_소유자의_기록은_신선해도_TTL로_보지_않고_즉시_인수한다(tmp_path):
+    path = tmp_path / ".scheduler.lock"
+    _write_record(path, timedelta(seconds=1), mode=lockmod.MODE_KERNEL)   # 죽은 KERNEL 소유자
+    lock = SchedulerLock(path=path, stale_minutes=60)
+    assert lock.acquire() is True
+    lock.release()
+
+
+def test_H2_기록이_빈_채_충돌이_반복되면_매번_WARNING과_실행_가능한_안내가_나온다(tmp_path, monkeypatch, caplog):
+    """락 영역을 상시 오판하는 FS 모사. 1회차(파일 생성)뿐 아니라 2회차 이후에도 알려야 한다."""
+    import errno
+
+    _use_windows_locker(monkeypatch, FakeMsvcrt(fail_errno=errno.EACCES))
+    path = tmp_path / ".scheduler.lock"
+    for attempt in range(3):
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            assert SchedulerLock(path=path, label="Probe").acquire() is False
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        text = " ".join(warnings)
+        assert "소유자 기록이 비어 있습니다" in text, attempt
+        assert "반복되면" in text and "로컬 디스크" in text and str(path) in text, attempt
+        assert "지우지 마십시오" in text
+        assert "종료하" not in text, attempt                 # pid가 없으니 종료하라는 안내는 틀렸다
+    assert path.read_bytes() == b" "
 
 
 def test_일반_폴백은_빈_기록도_회수한다(tmp_path, monkeypatch):

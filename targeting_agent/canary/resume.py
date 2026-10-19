@@ -219,11 +219,13 @@ def resume_canary(
         return result
 
     owns_connection = conn is None
-    if conn is None:
-        conn = get_connection(config.db_path)
-        init_db(conn)
 
     try:
+        # lock을 잡은 뒤의 모든 문장은 try 안에 둔다(예외가 나도 release가 돈다).
+        if conn is None:
+            conn = get_connection(config.db_path)
+            init_db(conn)
+
         # --- 상태 파일이 사라졌는데 이미 실제로 누른 기록이 있으면 --------------
         # 새 Canary를 여는 것은 한도를 처음부터 다시 쓰겠다는 뜻이다. 막는다(§42).
         if not path.exists():
@@ -336,7 +338,7 @@ def resume_canary(
         return result
     finally:
         lock.release()
-        if owns_connection:
+        if owns_connection and conn is not None:
             conn.close()
 
 
