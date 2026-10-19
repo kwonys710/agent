@@ -83,6 +83,9 @@ _STOP_STATUS: tuple[tuple[str, str], ...] = (
     # 로그인 만료인지 Challenge/경고인지 여기서는 알 수 없다 — 원인을 추측해 LOGIN/WARNING으로
     # 적지 않고 SAFETY로 멈춘다(사유 문자열은 stop_reason에 그대로 남는다).
     ("EXECUTOR_SESSION_INVALID", STOPPED_SAFETY),
+    # 우리 코드가 만드는 내부 사유. 기본값과 같은 상태지만 "인식하지 못함" 경고를 내지 않는다.
+    ("ERROR_COUNT", STOPPED_SAFETY),   # Controller 의 오류 서킷브레이커(error_count>=N)
+    ("UNKNOWN", STOPPED_SAFETY),       # SessionState.UNKNOWN(세션 상태 판독 불가)
 )
 
 # canonical_url은 **그 게시물을 실제로 열어** link[rel=canonical]을 읽었을 때만

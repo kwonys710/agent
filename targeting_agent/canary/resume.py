@@ -24,6 +24,7 @@ from typing import Any, Optional
 from ..core.config import Config
 from ..core.database import get_connection, init_db, today_str
 from ..core.logger import get_logger
+from ..discovery import browser_runner as _browser_runner
 from ..discovery.browser_runner import (
     STATUS_DISABLED,
     STATUS_EMPTY,
@@ -42,8 +43,6 @@ from .runner import (
     run_canary,
 )
 from .state import (
-    ARMED,
-    EXPIRED_NO_ELIGIBLE,
     READY_FOR_LIVE,
     STOPPED_SAFETY,
     WAITING_AI_BUDGET,
@@ -103,6 +102,36 @@ class DiscoveryOutcome:
     message: str = ""
     added: int = 0
     analyzed: int = 0
+
+
+# Discovery가 정의한 status 전체. browser_runner에 새 STATUS_*가 생기면 자동으로 따라온다
+# (여기 복사본을 두면 새 상태가 조용히 "알 수 없음"으로 떨어진다).
+_KNOWN_STATUSES = frozenset(
+    value
+    for name, value in vars(_browser_runner).items()
+    if name.startswith("STATUS_") and isinstance(value, str)
+)
+
+# SESSION_STOPPED 의 stop_reason 별 설명. Discovery 원문 안내("다시 시도하세요")는
+# Discovery 층에서만 맞다 — Canary 는 종료되므로 그대로 전달하지 않는다.
+_SESSION_CAUSE = {
+    "LOGIN_REQUIRED": "Instagram 로그인이 필요한 상태가 감지되었다",
+    "CHALLENGE": "본인 확인(Challenge)이 감지되었다",
+    "PLATFORM_WARNING": "이용 제한 경고가 감지되었다",
+}
+# UNKNOWN 도 의도적으로 TERMINAL 이다 — 판독하지 못한 상태에서 브라우저를 다시 여는 것은
+# 확인되지 않은 전제(실제로는 Challenge 였을 수 있다) 위에서 활동을 재개하는 일이다.
+_UNKNOWN_CAUSE = "세션 상태를 판독하지 못했다(플랫폼 신호가 확정된 것은 아니다)"
+
+
+def _recovery_notice(status: str, path) -> str:
+    """종료 상태에서 실제로 가능한 복구 절차. 재개용 CLI 는 일부러 없다(운영자 결정)."""
+    return (
+        f"Canary가 종료 상태({status})로 들어갔다. 재로그인·재실행만으로는 재개되지 않는다"
+        "(다음 Resume은 NOOP). 재개 명령(CLI)은 없다 — 플랫폼 상태를 직접 확인해 해소됐을 때에만 "
+        f"운영자가 상태 파일 {path} 의 \"status\"를 \"WAITING_NEXT_RUN\"으로 바꾸고 "
+        "\"stop_reason\"·\"completed_at\"을 빈 문자열(\"\")로 비운다."
+    )
 
 
 # Discovery가 실제로 검색을 돌려 본 결과(후보가 없을 수는 있다). 이때만 "후보 없음"이 의미를 갖는다.
@@ -189,7 +218,7 @@ def _ai_usage(
 
 
 def _eligible_summary(conn: sqlite3.Connection, config: Config) -> tuple[int, Optional[float]]:
-    """자격 후보 수와 실제 후보 최고점."""
+    """자격 후보 수와 실제 후보 최고점(DB 전체 집계 — 이번 실행 결과가 아니다)."""
     threshold = float(config.get("actions.require_score_for_like", 75))
     # _eligible_actions가 이미 합성 주소를 걸러 준다(한 곳에서만 판단한다).
     eligible = len(_eligible_actions(conn, like_threshold=threshold, limit=50))
@@ -209,6 +238,8 @@ def _run_discovery(
     (added, analyzed)로 줄이지 않는다 — 상태를 버리면 LOCKED·차단·실패가 모두
     "후보 없음"으로 읽힌다.
     """
+    # 함수 안 import 를 top-level 로 옮기지 마라 — 테스트가 browser_runner 모듈 속성을
+    # 패치해 Discovery 를 대체한다(top-level import 는 패치를 빗나간다).
     from ..discovery.browser_runner import run_browser_discovery
 
     limits = {
@@ -234,10 +265,9 @@ def _run_discovery(
     result = run_browser_discovery(runtime, conn, process=True)
     status = getattr(result, "status", None)
     message = str(getattr(result, "message", "") or "")
-    if status not in (
-        *_RAN_STATUSES, STATUS_FAILED, STATUS_SESSION_STOPPED, STATUS_LOCKED, STATUS_DISABLED
-    ):
+    if status not in _KNOWN_STATUSES:
         # 값이 없거나 모르는 상태를 성공으로 읽지 않는다(결과 객체의 기본값은 SUCCESS다).
+        logger.warning("알 수 없는 Discovery 상태(%r) — FAILED로 취급합니다.", status)
         message = f"알 수 없는 Discovery 상태({status!r}) {message}".strip()
         status = STATUS_FAILED
     stop_reason = getattr(result, "stop_reason", None)
@@ -252,21 +282,34 @@ def _run_discovery(
 
 
 def _stop_on_discovery_problem(
-    state: CanaryState, result: ResumeResult, outcome: DiscoveryOutcome, moment: datetime
+    state: CanaryState,
+    result: ResumeResult,
+    outcome: DiscoveryOutcome,
+    moment: datetime,
+    path,
 ) -> None:
     """Discovery가 후보 탐색 자체를 못 한 경우의 상태를 정한다.
 
     - SESSION_STOPPED: 플랫폼 이상 신호다. 기존 `_stop_status_for` 매핑으로 **종료**한다.
       종료 상태는 다음 Resume에서 조기 반환되므로 브라우저 Discovery를 다시 열지 않는다.
     - LOCKED / DISABLED / FAILED: 일시적이다. 종료하지 않고 다음 Run을 기다린다.
+      (DISABLED 는 이 경로에서 도달 불가다 — `_run_discovery` 가 enabled=True 를 강제한다.
+      방어적으로만 남긴 분기이며 커버리지를 근거로 쓰지 말 것.)
     """
     detail = f" — {outcome.message}" if outcome.message else ""
+    budget_note = ""
+    if result.ai_remaining <= 0:
+        budget_note = f" (참고: Claude 일일 한도 {result.ai_used}/{result.ai_limit} 소진)"
     if outcome.status == STATUS_SESSION_STOPPED:
-        reason = f"discovery_session_stopped:{outcome.stop_reason or 'UNKNOWN'}"
+        cause = _SESSION_CAUSE.get(outcome.stop_reason, _UNKNOWN_CAUSE)
+        reason = f"discovery_session_stopped:{outcome.stop_reason or 'UNKNOWN'} — {cause}"
         state.stop(_stop_status_for(outcome.stop_reason), reason, now=moment)
         result.step = STEP_BLOCKED
         result.status, result.reason = state.status, state.stop_reason
-        result.messages.append(f"Discovery 세션 중단({outcome.stop_reason or 'UNKNOWN'}){detail}")
+        # Discovery 원문 안내는 로그에만 남긴다(Canary 층에서는 "다시 시도" 가 거짓이다).
+        logger.warning("Discovery 세션 중단 원문(%s):%s", outcome.stop_reason or "UNKNOWN", detail)
+        result.messages.append(f"Discovery 세션 중단 — {cause}.")
+        result.messages.append(_recovery_notice(state.status, path))
         return
     if outcome.status == STATUS_LOCKED:
         reason = f"Discovery lock 경쟁(다른 Discovery가 진행 중) — 이번엔 실행되지 않았다{detail}"
@@ -274,10 +317,10 @@ def _stop_on_discovery_problem(
     elif outcome.status == STATUS_DISABLED:
         reason = f"browser_discovery가 비활성화되어 Discovery가 실행되지 않았다{detail}"
         result.step = STEP_NOOP
-    else:  # STATUS_FAILED
+    else:  # STATUS_FAILED(그리고 아직 분기가 없는 새 status)
         reason = f"Discovery 실행 실패({outcome.status}){detail} — 후보 없음이 아니다"
         result.step = STEP_BLOCKED
-    state.wait(WAITING_NEXT_RUN, reason)
+    state.wait(WAITING_NEXT_RUN, reason + budget_note)
     result.status, result.reason = state.status, state.last_waiting_reason
     result.messages.append(f"Discovery 상태 {outcome.status}: 다음 Run에서 다시 시도한다.")
 
@@ -347,6 +390,8 @@ def resume_canary(
             result.step = STEP_NOOP
             result.status = state.status
             result.reason = state.stop_reason or "이미 종료됨"
+            if (state.stop_reason or "").startswith("discovery_session_stopped"):
+                result.messages.append(_recovery_notice(state.status, path))
             return result
 
         if state.status == "NOT_STARTED":
@@ -378,10 +423,19 @@ def resume_canary(
             result.eligible, result.highest_score = _eligible_summary(conn, config)
             result.step = STEP_DISCOVERED
             if outcome.status not in _RAN_STATUSES:
-                # 운영 장애를 "후보 없음"으로 바꾸지 않는다.
-                _stop_on_discovery_problem(state, result, outcome, moment)
-                save_state(path, state)
-                return result
+                if outcome.status == STATUS_SESSION_STOPPED or result.eligible == 0:
+                    # 운영 장애를 "후보 없음"으로 바꾸지 않는다. 플랫폼 신호는 후보가
+                    # 있어도 진행하지 않는다.
+                    _stop_on_discovery_problem(state, result, outcome, moment, path)
+                    save_state(path, state)
+                    return result
+                # LOCKED/FAILED 여도 동시 실행이 이미 자격 후보를 커밋했을 수 있다.
+                # 상태는 남기되 기존 후보로 진행한다(불필요한 8시간 지연을 만들지 않는다).
+                result.messages.append(
+                    f"Discovery 상태 {outcome.status}"
+                    f"{' — ' + outcome.message if outcome.message else ''}: "
+                    f"자격 후보 {result.eligible}건이 이미 있어 기존 후보로 진행한다."
+                )
 
         # --- 여전히 없으면 기다린다(실패가 아니다) ----------------------------
         if result.eligible == 0:

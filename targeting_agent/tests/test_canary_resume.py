@@ -466,6 +466,8 @@ def test_discovery_lock_경쟁은_waiting_next_run이지_후보없음이_아니�
     assert result.status == WAITING_NEXT_RUN
     assert result.status != WAITING_ELIGIBLE
     assert result.step != STEP_WAITING_ELIGIBLE
+    # lock 경쟁은 정상적인 일시 상태다 — exit 1 이면 8시간마다 Task Scheduler 에 실패로 보인다.
+    assert result.step == STEP_NOOP and result.exit_code == 0
     assert "lock 경쟁" in result.reason
     assert "후보 없음" not in result.reason
     assert result.source_status == "LOCKED"
@@ -480,12 +482,16 @@ def test_discovery_lock_경쟁은_waiting_next_run이지_후보없음이_아니�
 def test_discovery_disabled도_waiting_next_run이다(
     conn: sqlite3.Connection, resume_config: Config, monkeypatch, tmp_path
 ):
+    """방어 분기 검증이다. Resume 경로에서는 DISABLED 에 도달할 수 없다
+    (`_run_discovery` 가 enabled=True 를 강제하므로 fake 가 직접 돌려줄 때만 나온다).
+    이 테스트의 통과를 실제 도달 가능성의 근거로 쓰지 말 것."""
     _spend_ai(conn, 5)
     _install(monkeypatch, _discovery_result("DISABLED"))
 
     result = resume_canary(conn=conn, config=resume_config, now=NOW)
 
     assert result.status == WAITING_NEXT_RUN
+    assert result.step == STEP_NOOP and result.exit_code == 0
     assert result.source_status == "DISABLED"
     assert "비활성화" in result.reason
     saved = load_state(state_path(tmp_path))
@@ -652,3 +658,165 @@ def test_discovery_임계값과_한도는_상태에_따라_바뀌지_않는다(
         resume_config.get("actions.require_score_for_like"),
         resume_config.get("ai.daily_request_limit"),
     )
+
+
+# ===========================================================================
+# 종료 상태의 복구 안내 — 실제 복구 수단과 일치해야 한다 (F1)
+# ===========================================================================
+def _stopped(conn, resume_config, monkeypatch, stop_reason, message=""):
+    _spend_ai(conn, 5)
+    fake = _install(
+        monkeypatch,
+        _discovery_result("SESSION_STOPPED", stop_reason=stop_reason, message=message),
+    )
+    return fake, resume_canary(conn=conn, config=resume_config, now=NOW)
+
+
+def test_세션중단_안내는_재로그인으로_재개된다고_말하지_않는다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch, tmp_path
+):
+    """Discovery 원문('로그인한 뒤 다시 시도하세요')은 Canary 층에서는 거짓이다."""
+    _, result = _stopped(
+        conn, resume_config, monkeypatch, "LOGIN_REQUIRED",
+        message="Instagram 로그인이 필요합니다. run_instagram_session.bat 을 실행해 "
+        "직접 로그인한 뒤 다시 시도하세요.",
+    )
+
+    text = "\n".join(result.messages) + format_resume(result)
+    assert "다시 시도하세요" not in text
+    assert "run_instagram_session" not in text
+    assert "종료 상태(STOPPED_LOGIN)" in text
+    assert "재로그인·재실행만으로는 재개되지 않는다" in text
+    assert str(state_path(tmp_path)) in text  # 실제 상태 파일 경로
+    assert "WAITING_NEXT_RUN" in text and "stop_reason" in text and "completed_at" in text
+    assert "CLI" in text  # 재개 명령이 없다는 사실
+
+
+def test_종료_뒤_다시_resume해도_복구_안내가_다시_보인다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch, tmp_path
+):
+    _stopped(conn, resume_config, monkeypatch, "CHALLENGE")
+
+    second = resume_canary(conn=conn, config=resume_config, now=NOW + timedelta(hours=9))
+
+    assert second.step == STEP_NOOP and second.status == STOPPED_CHALLENGE
+    assert any(str(state_path(tmp_path)) in m for m in second.messages)
+
+
+def test_안내한_수동_절차를_따르면_실제로_재개된다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch, tmp_path
+):
+    """안내가 실제 해제 수단과 일치하는지 — 안내대로 상태 파일을 고치면 Discovery 가 다시 열린다."""
+    import json
+
+    fake, _ = _stopped(conn, resume_config, monkeypatch, "LOGIN_REQUIRED")
+    path = state_path(tmp_path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.update({"status": "WAITING_NEXT_RUN", "stop_reason": "", "completed_at": ""})
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    again = resume_canary(conn=conn, config=resume_config, now=NOW + timedelta(hours=9))
+
+    assert fake.calls == 2
+    assert again.step != STEP_NOOP
+
+
+def test_세션_상태_판독불가는_플랫폼_신호가_확정된_것이_아님을_밝히고_종료를_유지한다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch, tmp_path
+):
+    """UNKNOWN 은 의도적으로 TERMINAL 이다(판독 불가 상태에서 브라우저를 다시 열지 않는다)."""
+    fake, result = _stopped(conn, resume_config, monkeypatch, "UNKNOWN")
+
+    assert result.status == STOPPED_SAFETY
+    assert load_state(state_path(tmp_path)).terminal is True
+    assert "판독하지 못했다" in result.reason
+    assert "플랫폼 신호가 확정된 것은 아니다" in result.reason
+    assert any("판독하지 못했다" in m for m in result.messages)
+    assert any("재개되지 않는다" in m for m in result.messages)
+    resume_canary(conn=conn, config=resume_config, now=NOW + timedelta(hours=9))
+    assert fake.calls == 1  # 그래도 다시 열지 않는다
+
+
+def test_stop_reason이_enum이어도_값_문자열로_보존된다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch
+):
+    from targeting_agent.discovery.browser_models import SessionState
+
+    _, result = _stopped(conn, resume_config, monkeypatch, SessionState.CHALLENGE)
+
+    assert result.source_stop_reason == "CHALLENGE"
+    assert result.status == STOPPED_CHALLENGE
+    assert "SessionState" not in format_resume(result)
+
+
+# ===========================================================================
+# 이미 자격을 얻은 후보는 버리지 않는다 (F2)
+# ===========================================================================
+@pytest.mark.parametrize("status", ["LOCKED", "FAILED"])
+def test_lock이나_실패여도_자격_후보가_이미_있으면_진행한다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch, tmp_path, status: str
+):
+    """동시 실행이 같은 DB 에 자격 후보를 커밋했을 수 있다 — 8시간을 버리지 않는다."""
+    _spend_ai(conn, 5)
+    _install(
+        monkeypatch, _discovery_result(status, message="x"), side_effect=_seed_real_candidate
+    )
+
+    result = resume_canary(conn=conn, config=resume_config, now=NOW, allow_live=False)
+
+    assert result.step == STEP_REHEARSED
+    assert result.eligible == 1
+    assert result.source_status == status  # 원래 상태는 그대로 남는다
+    assert any(status in m and "기존 후보로 진행" in m for m in result.messages)
+    assert load_state(state_path(tmp_path)).rehearsal_passed_at
+
+
+def test_세션중단이면_자격_후보가_있어도_진행하지_않는다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch, tmp_path
+):
+    """플랫폼 이상 신호에서는 후보가 있어도 STOP 이다."""
+    _spend_ai(conn, 5)
+    _install(
+        monkeypatch, _discovery_result("SESSION_STOPPED", stop_reason="PLATFORM_WARNING"),
+        side_effect=_seed_real_candidate,
+    )
+
+    result = resume_canary(conn=conn, config=resume_config, now=NOW, allow_live=False)
+
+    assert result.eligible == 1
+    assert result.status == STOPPED_WARNING
+    assert result.rehearsal_ok is None
+    saved = load_state(state_path(tmp_path))
+    assert saved.terminal is True and saved.rehearsal_passed_at == ""
+
+
+# ===========================================================================
+# 예산 정보 보존 (F6) / 출력 형태 (F4)
+# ===========================================================================
+def test_discovery_실패와_예산_소진이_겹치면_사유에_예산도_남는다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch
+):
+    _spend_ai(conn, 5)
+    _install(
+        monkeypatch, _discovery_result("FAILED"), side_effect=lambda c: _spend_ai(c, 20)
+    )
+
+    result = resume_canary(conn=conn, config=resume_config, now=NOW)
+
+    assert result.status == WAITING_NEXT_RUN
+    assert "Discovery 실행 실패" in result.reason
+    assert "20/20" in result.reason and "소진" in result.reason
+
+
+def test_discovery_상태_표시는_빈_사유나_빈_상태를_이상하게_찍지_않는다():
+    from targeting_agent.canary.resume import ResumeResult
+
+    assert ResumeResult(source_status="LOCKED").as_rows()["Discovery 상태"] == "LOCKED"
+    assert ResumeResult().as_rows()["Discovery 상태"] == "-"
+    assert (
+        ResumeResult(source_status="SESSION_STOPPED", source_stop_reason="CHALLENGE")
+        .as_rows()["Discovery 상태"]
+        == "SESSION_STOPPED (CHALLENGE)"
+    )
+    # 상태 없이 사유만 있어도 괄호만 찍히지 않는다.
+    assert "()" not in ResumeResult(source_status="LOCKED").as_rows()["Discovery 상태"]

@@ -669,6 +669,30 @@ def test_인식하지_못한_중단_사유는_특정_신호처럼_기록되지_�
     assert _stop_status_for("platform_warning:LOGIN_REQUIRED") == "STOPPED_LOGIN"
 
 
+def test_내부_사유는_인식하지_못한_사유로_경고되지_않는다(caplog):
+    """error_count>=N(서킷브레이커)과 SessionState.UNKNOWN 은 우리가 아는 사유다."""
+    import logging
+
+    from targeting_agent.canary.runner import _stop_status_for
+
+    with caplog.at_level(logging.WARNING):
+        for reason in ("error_count>=3", "UNKNOWN", "discovery_session_stopped:UNKNOWN"):
+            assert _stop_status_for(reason) == "STOPPED_SAFETY"
+    assert "인식하지 못한" not in caplog.text
+
+    with caplog.at_level(logging.WARNING):
+        _stop_status_for("brand_new_reason")
+    assert "인식하지 못한" in caplog.text
+
+
+def test_canary_run_결과의_exit_code는_중단일_때만_1이다():
+    from targeting_agent.canary.runner import CanaryRunResult
+
+    assert CanaryRunResult(outcome=OUTCOME_STOPPED).exit_code == 1
+    assert CanaryRunResult(outcome=OUTCOME_EXECUTED).exit_code == 0
+    assert CanaryRunResult(outcome=OUTCOME_NO_CANDIDATES).exit_code == 0
+
+
 def test_comment_위반이면_canary를_멈춘다(conn: sqlite3.Connection, canary_config: Config):
     _seed(conn, count=1)
     state = arm(CanaryState(), now=NOW)
