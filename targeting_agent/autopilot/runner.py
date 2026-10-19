@@ -148,6 +148,7 @@ def run_autopilot(
         path=config._resolve_path(config.get("autopilot.lock.path", "data/.autopilot.lock")),
         stale_minutes=int(config.get("autopilot.lock.stale_minutes", 60)),
         enabled=bool(config.get("autopilot.lock.enabled", True)),
+        label="Autopilot",
     )
     if not lock.acquire(now):
         result.status = STATUS_LOCKED

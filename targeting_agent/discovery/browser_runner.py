@@ -273,6 +273,7 @@ def run_browser_discovery(
         ),
         stale_minutes=int(config.get("browser_discovery.lock.stale_minutes", 30)),
         enabled=bool(config.get("browser_discovery.lock.enabled", True)),
+        label="Browser Discovery",
     )
     if not lock.acquire(now):
         result.status = STATUS_LOCKED

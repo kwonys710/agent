@@ -437,3 +437,35 @@ def test_disabled_scheduler_is_noop(conn, config, tmp_path) -> None:
 
     assert result.exit_code == 0 and result.processed == 0
     assert runner.calls == [] and result.summary_path is None
+
+
+def test_lock_로그에_어느_실행인지_나온다(tmp_path, caplog):
+    """같은 lock 클래스를 여러 실행이 쓰므로, 문구로 소유자가 분간돼야 한다.
+
+    실기에서 Discovery가 막혔는데 '다른 Scheduled Run이 진행 중'이라고 찍혀 혼동됐다.
+    """
+    import json
+    import logging
+    import os
+    from datetime import datetime, timezone
+
+    from targeting_agent.scheduler.lock import SchedulerLock
+
+    path = tmp_path / ".browser_discovery.lock"
+    path.write_text(
+        json.dumps(
+            {"pid": 12428, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        ),
+        encoding="utf-8",
+    )
+    lock = SchedulerLock(path=path, stale_minutes=30, label="Browser Discovery")
+
+    with caplog.at_level(logging.INFO):
+        acquired = lock.acquire()
+
+    assert acquired is False
+    message = caplog.text
+    assert "Browser Discovery" in message
+    assert "Scheduled Run" not in message
+    assert "12428" in message
+    assert str(path) in message  # 어느 파일을 지워야 하는지 알려 준다

@@ -192,6 +192,7 @@ def run_comment_canary(
         ),
         stale_minutes=int(config.get("canary.comment.lock.stale_minutes", 30)),
         enabled=bool(config.get("canary.comment.lock.enabled", True)),
+        label="COMMENT Canary",
     )
     if not lock.acquire(moment):
         result.outcome = OUTCOME_LOCKED

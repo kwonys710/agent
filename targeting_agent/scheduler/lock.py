@@ -24,6 +24,9 @@ class SchedulerLock:
     path: Path
     stale_minutes: int = 60
     enabled: bool = True
+    # 로그에 쓸 이름. 같은 lock 클래스를 Scheduled Run / Discovery / Canary가 함께 쓰므로,
+    # 어느 실행이 잡고 있는지 문구로 분간되게 한다.
+    label: str = "Scheduled Run"
     _acquired: bool = False
 
     def acquire(self, now: Optional[datetime] = None) -> bool:
@@ -38,10 +41,19 @@ class SchedulerLock:
         if held is not None:
             if self._is_stale(held, now):
                 logger.warning(
-                    "오래된 lock을 회수합니다(생성 %s, TTL %d분).", held.get("created_at"), self.stale_minutes
+                    "오래된 %s lock을 회수합니다(생성 %s, TTL %d분).",
+                    self.label,
+                    held.get("created_at"),
+                    self.stale_minutes,
                 )
             else:
-                logger.info("다른 Scheduled Run이 진행 중입니다(pid=%s).", held.get("pid"))
+                logger.info(
+                    "다른 %s이 진행 중입니다(pid=%s, lock=%s). "
+                    "그 프로세스가 끝나지 않았다면 기다리고, 이미 종료됐다면 lock 파일을 지우면 됩니다.",
+                    self.label,
+                    held.get("pid"),
+                    self.path,
+                )
                 return False
 
         self.path.write_text(
