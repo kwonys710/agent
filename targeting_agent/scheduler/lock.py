@@ -152,6 +152,11 @@ class SchedulerLock:
         if not self.enabled:
             return True
 
+        if not self._acquired:
+            # 인스턴스를 재사용해도 이전 시도의 값이 남지 않게 한다(mode/blocked_info 의 의미 유지).
+            self._mode = ""
+            self.blocked_info = {}
+
         now = now or datetime.now(timezone.utc)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -235,6 +240,7 @@ class SchedulerLock:
         fd, self._fd = self._fd, None
         unlock, self._unlock = self._unlock, None
         self._acquired = False
+        self._mode = ""
         try:
             # 반드시 락이 풀리기(close) 전에 쓴다. 풀린 뒤에 쓰면 새 소유자의 기록을 덮어쓴다.
             released = {

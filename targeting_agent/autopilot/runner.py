@@ -55,7 +55,12 @@ from ..discovery.browser_runner import BrowserDiscoveryResult, run_browser_disco
 from ..discovery.ingest import CandidateIngestor, ImportSummary
 from ..pipeline import next_run_id
 from ..scheduler.lock import SchedulerLock
-from ..scheduler.runtime_state import record_blocked, record_finished, record_started
+from ..scheduler.runtime_state import (
+    lock_stale_minutes,
+    record_blocked,
+    record_finished,
+    record_started,
+)
 
 logger = get_logger("autopilot.runner")
 
@@ -153,7 +158,7 @@ def run_autopilot(
 
     lock = SchedulerLock(
         path=config._resolve_path(config.get("autopilot.lock.path", "data/.autopilot.lock")),
-        stale_minutes=int(config.get("autopilot.lock.stale_minutes", 60)),
+        stale_minutes=lock_stale_minutes(config, "autopilot"),
         enabled=bool(config.get("autopilot.lock.enabled", True)),
         label="Autopilot",
     )
@@ -211,6 +216,7 @@ def run_autopilot(
                 _record_run(conn, result)
             except sqlite3.Error:  # pragma: no cover - 이력 기록 실패는 무시
                 logger.warning("Autopilot 이력 기록 실패(무시)")
+            # 트랜잭션 결합: 위 _record_run 이 이미 같은 conn 을 commit 하므로 commit 시점은 달라지지 않는다.
             record_finished(conn, "autopilot", result.status, result.halt_reason or result.message)
         lock.release()
         if owns_connection and conn is not None:

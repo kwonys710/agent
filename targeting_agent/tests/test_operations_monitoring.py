@@ -382,7 +382,8 @@ def test_LOCKED와_미종료_기록은_모든_KPI_집계를_바꾸지_않는다(
         status = queries.operational_status(conn, config)
         status.pop("runtime_blocked")                      # 이번에 추가한 표시 키만 제외한다
         tables = ("scheduled_runs", "browser_discovery_runs", "autopilot_runs", "action_queue",
-                  "interactions", "daily_stats", "candidate_media")
+                  "interactions", "daily_stats", "candidate_media", "query_runs", "import_events",
+                  "creators")
         return {
             "discovery": dataclasses.asdict(collect_discovery_metrics(conn)),
             "executor": dataclasses.asdict(collect_executor_metrics(conn)),

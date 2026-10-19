@@ -286,17 +286,15 @@ def _unique(items: list[str]) -> list[str]:
 
 def _canary_rows(conn: sqlite3.Connection, config: Config) -> dict[str, str]:
     """Canary 진행 상황. 상태 파일이 없으면 '아직 시작 안 함'이다."""
-    from ..canary.resume import _ai_usage
+    # _eligible_summary 는 canary/resume.py 와 같은 최고점 질의를 쓴다(복사하지 않는다).
+    from ..canary.resume import _ai_usage, _eligible_summary
     from ..canary.state import load_state, state_path
 
     state = load_state(state_path(config.data_dir))
     used, limit = _ai_usage(conn, config)
     threshold = float(config.get("actions.require_score_for_like", 75))
-    best = conn.execute(
-        "SELECT MAX(target_score) FROM candidate_media "
-        "WHERE source = 'instagram_browser_search' AND target_score IS NOT NULL"
-    ).fetchone()
-    highest = f"{float(best[0]):.2f}" if best and best[0] is not None else "-"
+    _eligible, best = _eligible_summary(conn, config)
+    highest = f"{best:.2f}" if best is not None else "-"
     next_run = state.next_allowed_run()
     return {
         "상태": state.status,
@@ -304,7 +302,10 @@ def _canary_rows(conn: sqlite3.Connection, config: Config) -> dict[str, str]:
         "확인된 실제 LIKE": f"{state.total_live_likes} / {state.max_total}",
         "오늘": f"{state.today_live_likes} / {state.max_per_day}",
         "Claude 한도": f"{used} / {limit} (남음 {max(0, limit - used)})",
-        "LIKE 임계값 / 실제 최고점": f"{threshold:.0f} / {highest}",
+        # 최고점은 DB 전체 누적이다. 이번 실행 결과로 읽으면 "점수가 모자라다 → 임계값을 낮추자"로 오해한다.
+        "LIKE 임계값 / 실제 후보 최고점(DB 누적)": (
+            f"{threshold:.0f} / {highest} (DB 누적 최고점 — 이번 실행 결과가 아님)"
+        ),
         "LIVE 창": (
             f"{state.live_started_at} ~ {state.ends_at}"
             if state.live_started_at

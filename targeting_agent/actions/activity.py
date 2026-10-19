@@ -58,19 +58,19 @@ def extract_signal(reason: Optional[str]) -> str:
 
     Controller는 실제 사유를 `platform_warning:<사유>` 로 감싼다. 첫 토큰만 읽으면 래퍼 라벨이
     안쪽의 CHALLENGE 를 가려 STOPPED 가 CAUTION 으로 강등된다. 그래서 STOP 신호 → CAUTION 신호
-    순으로 문자열 안에서 찾고, 둘 다 없으면 예전처럼 첫 토큰을 돌려준다.
-    UNKNOWN_COMMENT_STATE 처럼 신호 이름을 포함할 뿐인 토큰은 경계 검사로 걸러진다.
+    순으로 찾고, 둘 다 없으면 예전처럼 첫 토큰을 돌려준다.
+
+    사유를 `:` `/` `,` 로 나눈 **조각 전체가 신호 이름과 같을 때만** 신호로 본다. 문자열 안에 이름이
+    들어 있기만 한 경우("challenge=false", "CHALLENGE 아님", "no challenge", "challenge-dialog not
+    found")는 신호가 아니다 — STOPPED 는 사람만 풀 수 있어 거짓 STOP 의 비용이 크다. 공백은 구분자가
+    아니다(공백으로 쪼개면 "no challenge" 가 CHALLENGE 가 된다). 실제 생산자는 모두 `:` 로 구분한다.
     """
     text = str(reason or "").upper()
+    pieces = [piece.strip() for piece in re.split(r"[:/,]", text)]
     for group in (STOP_SIGNALS, CAUTION_SIGNALS):
-        found = [
-            (match.start(), name)
-            for name in group
-            for match in [re.search(rf"(?<![A-Z0-9_]){name}(?![A-Z0-9_])", text)]
-            if match
-        ]
-        if found:
-            return min(found)[1]
+        for piece in pieces:
+            if piece in group:
+                return piece
     return text.split(":", 1)[0].strip()
 
 

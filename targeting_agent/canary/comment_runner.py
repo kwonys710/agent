@@ -35,7 +35,12 @@ from ..core.database import (
 )
 from ..core.logger import get_logger
 from ..scheduler.lock import SchedulerLock
-from ..scheduler.runtime_state import record_blocked, record_finished, record_started
+from ..scheduler.runtime_state import (
+    lock_stale_minutes,
+    record_blocked,
+    record_finished,
+    record_started,
+)
 from .comment_executor import CommentOnlyExecutor, build_comment_only_executor
 from .resume import is_real_instagram_target
 
@@ -191,7 +196,7 @@ def run_comment_canary(
         path=config._resolve_path(
             config.get("canary.comment.lock.path", "data/.canary_comment.lock")
         ),
-        stale_minutes=int(config.get("canary.comment.lock.stale_minutes", 30)),
+        stale_minutes=lock_stale_minutes(config, "comment_canary"),
         enabled=bool(config.get("canary.comment.lock.enabled", True)),
         label="COMMENT Canary",
     )
@@ -280,8 +285,15 @@ def run_comment_canary(
         result.messages.append(str(exc)[:300])
     finally:
         result.finished_at = utc_now()
+        # 트랜잭션 결합 주의: record_finished 의 commit 이 이 Run 의 미커밋 쓰기(approve_action 루프 도중
+        # 실패한 승인 등)를 영속시키면 실패한 Canary 가 다음 실행이 게시할 승인 건을 남긴다.
+        # 직접 연 conn 은 close 가 하던 것과 같게 먼저 롤백하고, 호출자의 conn 이면 commit 하지 않는다
+        # (기록은 호출자의 트랜잭션에 합류하고 영속 여부는 호출자가 정한다).
+        if owns_connection and conn is not None:
+            conn.rollback()
         record_finished(
-            conn, "comment_canary", result.outcome, result.stop_reason or "; ".join(result.messages)[:200]
+            conn, "comment_canary", result.outcome, result.stop_reason or "; ".join(result.messages)[:200],
+            commit=owns_connection,
         )
         lock.release()
         if owns_connection and conn is not None:

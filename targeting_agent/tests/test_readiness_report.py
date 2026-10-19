@@ -305,7 +305,7 @@ def test_Runtime_섹션이_있고_기록이_없으면_기록_없음이다(conn: 
     report = build_readiness(conn, config)
 
     assert set(report.sections[SECTION]) == {
-        "Scheduler", "Browser Discovery", "Autopilot", "COMMENT Canary"
+        "Scheduler Run", "Browser Discovery", "Autopilot", "COMMENT Canary"
     }
     assert set(report.sections[SECTION].values()) == {"기록 없음"}
     assert report.verdict == GO                     # 기록이 없다는 이유로 판정이 바뀌지 않는다
@@ -321,7 +321,7 @@ def test_단발_LOCKED는_경고하지_않고_GO를_유지한다(conn: sqlite3.C
 
     assert report.verdict == GO
     assert not any("Browser Discovery" in item for item in report.risks)
-    assert "차단 1회(연속)" in report.sections[SECTION]["Browser Discovery"]
+    assert "차단 1회(연속" in report.sections[SECTION]["Browser Discovery"]
 
 
 def test_연속_차단은_risk_한_줄이고_blockers_NO_GO로_가지_않는다(
@@ -338,7 +338,7 @@ def test_연속_차단은_risk_한_줄이고_blockers_NO_GO로_가지_않는다(
     assert len(mine) == 1 and "pid=4242" in mine[0]
     assert not report.blockers and report.technical == READY
     assert report.verdict == CONDITIONAL_GO         # 부작용: risks 가 비지 않아 GO 에서 내려간다
-    assert "차단 2회(연속)" in report.sections[SECTION]["Browser Discovery"]
+    assert "차단 2회(연속" in report.sections[SECTION]["Browser Discovery"]
 
 
 def test_미종료_실행은_stale_초과일_때만_risk다(conn: sqlite3.Connection, config: Config):
@@ -369,10 +369,11 @@ def test_Runtime_신호는_blockers로_승격되지_않는다(conn: sqlite3.Conn
         record_started(conn, runtime, _fake_lock(), now=start)
         _block(conn, config, runtime, 3, start + timedelta(minutes=1))
 
-    report = build_readiness(conn, config, now=start + timedelta(days=2))
+    report = build_readiness(conn, config, now=start + timedelta(minutes=90))
 
     assert report.blockers == [] and report.verdict != NO_GO
-    assert len([item for item in report.risks if "Runtime" in item or "연속 차단" in item]) >= 2
+    # 연속 차단 2건 + 미종료 2건이 모두 risk 로만 간다
+    assert len([item for item in report.risks if "연속 차단" in item or "미종료" in item]) == 4
 
 
 def test_Runtime_섹션은_html에서_escape된다(conn: sqlite3.Connection, config: Config):
@@ -394,3 +395,25 @@ def test_Runtime_섹션은_html에서_escape된다(conn: sqlite3.Connection, con
     assert "<script>alert(1)</script>" not in text
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
     assert SECTION in text
+
+
+def test_LIKE_임계값_옆의_최고점은_DB_누적임을_밝힌다(conn: sqlite3.Connection, config: Config):
+    """교훈 6: '점수가 모자라다 → 임계값을 낮추자' 오해를 부르는 라벨을 쓰지 않는다."""
+    _healthy(conn, feedback=12)
+    conn.execute("UPDATE candidate_media SET source = 'instagram_browser_search'")
+
+    rows = build_readiness(conn, config).sections["Live Canary"]
+
+    assert "LIKE 임계값 / 실제 최고점" not in rows
+    label = "LIKE 임계값 / 실제 후보 최고점(DB 누적)"
+    assert label in rows
+    assert "90.00" in rows[label] and "DB 누적 최고점 — 이번 실행 결과가 아님" in rows[label]
+
+
+def test_Canary_최고점은_resume의_질의를_재사용한다():
+    import inspect
+
+    from targeting_agent.readiness import report
+
+    assert "_eligible_summary" in inspect.getsource(report._canary_rows)
+    assert "MAX(target_score)" not in inspect.getsource(report._canary_rows)

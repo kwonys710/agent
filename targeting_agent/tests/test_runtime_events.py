@@ -485,7 +485,11 @@ def test_SchedulerLock을_쓰는_모든_모듈이_차단_기록도_호출한다(
         lifecycle[rel] = names
 
     assert len(users) >= 5                              # 탐색 범위가 좁아지지 않았는지 자체 점검
-    assert users - recording == {"canary/resume.py"}
+    assert users - recording == {"canary/resume.py"}, (
+        "차단 기록을 적용하지 않은 SchedulerLock 사용처가 예정과 다르다. canary/resume.py 에 "
+        "record_blocked 를 넣었다면 이 집합에서 빼라 — record_started/record_finished 도 같이 넣어야 "
+        "한다(아래 단정이 강제한다). 이 단정을 지우지 마라: 새 lock 사용처가 기록을 빠뜨리는 것을 막는다."
+    )
     for rel in recording:
         assert {"record_started", "record_finished"} <= lifecycle[rel], rel
 
@@ -549,3 +553,392 @@ def test_autopilot에서_CHALLENGE가_래핑돼_와도_STOPPED로_올린다(conf
     assert result.halted is True and result.halt_reason.startswith("platform_warning:CHALLENGE")
     assert result.activity_state == "STOPPED"
     assert current_state(conn)[0] is ActivityState.STOPPED
+
+
+# =============================================================================
+# 리뷰 후속: 로그 · 보존 · 나이 상한 · 손상 입력 · 기본값 · 소유권 · 트랜잭션 · 토큰화
+# =============================================================================
+def runtime_row(status, runtime: str) -> dict:
+    return next(r for r in status.rows if r["runtime"] == runtime)
+
+
+# --- H1. 조기 반환도 흔적을 남긴다 ----------------------------------------------
+def test_DB가_없어서_차단_기록을_생략하면_로그가_남는다(config, tmp_path, caplog):
+    import logging
+
+    cfg = runtime_config(config, tmp_path)
+    assert not cfg.db_path.exists()
+
+    with caplog.at_level(logging.INFO, logger="targeting_agent.scheduler.runtime_state"):
+        record_blocked(cfg, "scheduler", fake_lock(), now=T0)
+
+    assert "Runtime 차단 기록 생략" in caplog.text and "DB 없음" in caplog.text
+    assert str(cfg.db_path) in caplog.text
+
+
+# --- M1. 직전 완료 정보 보존 ----------------------------------------------------
+def test_시작_기록이_직전_완료_정보를_보존한다(config, conn):
+    record_started(conn, "scheduler", fake_lock(), now=T0)
+    record_finished(conn, "scheduler", "FAILED", "boom", now=T0 + timedelta(minutes=1))
+    record_started(conn, "scheduler", fake_lock(), now=T0 + timedelta(hours=1))
+
+    run = state(conn, "runtime_run:scheduler")
+    assert run["finished_at"] is None and run["status"] is None            # 이번 실행은 진행 중
+    assert run["last_status"] == "FAILED" and run["last_reason"] == "boom"
+    assert run["last_finished_at"] == (T0 + timedelta(minutes=1)).isoformat(timespec="seconds")
+    text = runtime_row(collect_runtime_status(conn, config, now=T0 + timedelta(hours=1, minutes=5)),
+                       "scheduler")["text"]
+    assert "직전 완료 FAILED" in text and "실행 중 또는 미종료 5분 경과" in text
+
+
+def test_종료_없이_다시_시작해도_마지막_완료는_이어진다(config, conn):
+    """SIGKILL 로 끝난 실행 뒤에도 '직전 실행은 성공했나'에 답할 수 있어야 한다."""
+    record_started(conn, "autopilot", fake_lock(), now=T0)
+    record_finished(conn, "autopilot", "OK", now=T0 + timedelta(minutes=1))
+    record_started(conn, "autopilot", fake_lock(), now=T0 + timedelta(hours=1))      # 이 실행은 죽었다
+    record_started(conn, "autopilot", fake_lock(), now=T0 + timedelta(hours=2))      # 다음 실행
+
+    run = state(conn, "runtime_run:autopilot")
+    assert run["last_status"] == "OK"
+    assert run["last_finished_at"] == (T0 + timedelta(minutes=1)).isoformat(timespec="seconds")
+
+
+def test_첫_실행은_완료_기록_없음이다(config, conn):
+    record_started(conn, "scheduler", fake_lock(), now=T0)
+
+    run = state(conn, "runtime_run:scheduler")
+    assert run["last_status"] is None and run["last_finished_at"] is None
+    assert "완료 기록 없음" in runtime_row(
+        collect_runtime_status(conn, config, now=T0 + timedelta(minutes=1)), "scheduler")["text"]
+
+
+# --- M2. 연속 차단 경고의 나이 상한 ---------------------------------------------
+@pytest.mark.parametrize("runtime, stale", [("scheduler", 60), ("comment_canary", 30)])
+def test_연속_차단_경고는_stale_분의_2배까지만_유지된다(config, conn, tmp_path, runtime, stale):
+    from targeting_agent.scheduler.runtime_state import BLOCK_WARNING_MAX_AGE_FACTOR
+
+    cfg = runtime_config(config, tmp_path)
+    last_block = T0 + timedelta(minutes=1)
+    record_blocked(cfg, runtime, fake_lock(), conn=conn, now=T0)
+    record_blocked(cfg, runtime, fake_lock(), conn=conn, now=last_block)
+    limit = stale * BLOCK_WARNING_MAX_AGE_FACTOR
+
+    at_limit = collect_runtime_status(conn, config, now=last_block + timedelta(minutes=limit))
+    past = collect_runtime_status(conn, config, now=last_block + timedelta(minutes=limit, seconds=60))
+
+    assert len(at_limit.warnings) == 1
+    assert past.warnings == []                                   # 압력이 끝난 오래된 streak
+    assert "차단 2회(연속" in runtime_row(past, runtime)["text"]   # 사실은 행에 남는다
+    assert BLOCK_WARNING_MAX_AGE_FACTOR == 2
+
+
+# --- M3. 같은 초 경계 · 손상 입력 -----------------------------------------------
+def test_같은_초에_시작한_소유자를_반복_차단해도_streak이_쌓인다(config, conn, tmp_path):
+    cfg = runtime_config(config, tmp_path)
+    record_started(conn, "scheduler", fake_lock(), now=T0)
+    record_blocked(cfg, "scheduler", fake_lock(), conn=conn, now=T0)
+    record_blocked(cfg, "scheduler", fake_lock(), conn=conn, now=T0)
+
+    assert state(conn, "runtime_block:scheduler")["streak"] == 2
+    assert len(collect_runtime_status(conn, config, now=T0).warnings) == 1
+
+
+def test_손상된_started_at은_연속으로_보지_않고_로그를_남긴다(config, conn, tmp_path, caplog):
+    import logging
+
+    cfg = runtime_config(config, tmp_path)
+    record_started(conn, "autopilot", fake_lock(), now=T0)
+    record_blocked(cfg, "autopilot", fake_lock(), conn=conn, now=T0 + timedelta(minutes=1))
+    run = state(conn, "runtime_run:autopilot")
+    run["started_at"] = "not-a-time"
+    conn.execute("UPDATE app_state SET value = ? WHERE key = 'runtime_run:autopilot'",
+                 (json.dumps(run),))
+    conn.commit()
+
+    with caplog.at_level(logging.WARNING, logger="targeting_agent.scheduler.runtime_state"):
+        record_blocked(cfg, "autopilot", fake_lock(), conn=conn, now=T0 + timedelta(minutes=2))
+        status = collect_runtime_status(conn, config, now=T0 + timedelta(minutes=3))
+
+    assert state(conn, "runtime_block:autopilot")["streak"] == 1           # 누적하지 않는다(거짓 경고 방지)
+    assert status.warnings == []
+    assert "not-a-time" in caplog.text
+    assert "시작 시각을 읽을 수 없음" in runtime_row(status, "autopilot")["text"]
+
+
+def test_손상된_JSON은_기록_없음과_구분되게_로그를_남긴다(config, conn, caplog):
+    import logging
+
+    conn.execute("INSERT INTO app_state (key, value, updated_at) VALUES "
+                 "('runtime_run:scheduler', '{broken', 'x')")
+    conn.commit()
+
+    with caplog.at_level(logging.WARNING, logger="targeting_agent.scheduler.runtime_state"):
+        status = collect_runtime_status(conn, config, now=T0)
+
+    assert "손상" in caplog.text and "runtime_run:scheduler" in caplog.text
+    assert runtime_row(status, "scheduler")["text"] == NO_RECORD
+
+
+# --- M4. stale 기본값은 한 곳 ---------------------------------------------------
+def without_stale_keys(config: Config) -> Config:
+    raw = json.loads(json.dumps(config.raw))
+    for dotted in ("scheduler.lock", "autopilot.lock", "browser_discovery.lock", "canary.comment.lock"):
+        node = raw
+        for part in dotted.split("."):
+            node = node.setdefault(part, {})
+        node.pop("stale_minutes", None)
+    return Config(raw=raw, path=config.path, base_dir=config.base_dir)
+
+
+DEFAULT_STALE = {"scheduler": 60, "browser_discovery": 30, "autopilot": 60, "comment_canary": 30}
+
+
+@pytest.mark.parametrize("runtime, stale", sorted(DEFAULT_STALE.items()))
+def test_config에_stale_minutes가_없으면_기본값으로_판정한다(config, conn, runtime, stale):
+    cfg = without_stale_keys(config)
+    record_started(conn, runtime, fake_lock(), now=T0)
+
+    before = collect_runtime_status(conn, cfg, now=T0 + timedelta(minutes=stale, seconds=-1))
+    at = collect_runtime_status(conn, cfg, now=T0 + timedelta(minutes=stale))
+
+    assert before.warnings == [] and len(at.warnings) == 1
+
+
+def test_러너가_lock에_넘기는_stale_기본값은_readiness가_쓰는_값과_같다(config, conn, tmp_path, monkeypatch):
+    """러너 기본값이 바뀌면 readiness 판정만 옛 값으로 남는 것을 막는다(기본값은 한 곳)."""
+    from targeting_agent.autopilot import runner as autopilot_runner
+    from targeting_agent.canary import comment_runner
+    from targeting_agent.discovery import browser_runner
+    from targeting_agent.scheduler import runner as scheduler_runner
+    from targeting_agent.scheduler.runtime_state import lock_stale_minutes
+
+    seen: dict[str, int] = {}
+
+    class Recorder:
+        def __init__(self, *, stale_minutes, label="Scheduled Run", **kwargs):
+            self.stale_minutes, self.label = stale_minutes, label
+            self.blocked_info, self.mode, self.path = {}, "", tmp_path / "x"
+
+        def acquire(self, now=None):
+            seen[self.label] = self.stale_minutes
+            return False
+
+    cfg = without_stale_keys(runtime_config(config, tmp_path))
+    for module in (scheduler_runner, browser_runner, autopilot_runner, comment_runner):
+        monkeypatch.setattr(module, "SchedulerLock", Recorder)
+    run_scheduled(cfg, conn)
+    run_browser_discovery(cfg, conn)
+    run_autopilot(cfg, conn)
+    run_comment_canary(cfg, conn=conn, live=False)
+
+    assert seen == {
+        "Scheduled Run": lock_stale_minutes(cfg, "scheduler"),
+        "Browser Discovery": lock_stale_minutes(cfg, "browser_discovery"),
+        "Autopilot": lock_stale_minutes(cfg, "autopilot"),
+        "COMMENT Canary": lock_stale_minutes(cfg, "comment_canary"),
+    }
+    assert {k: lock_stale_minutes(cfg, k) for k in DEFAULT_STALE} == DEFAULT_STALE
+
+
+# --- M5. record_finished 의 pid 소유권 가드 -------------------------------------
+def test_다른_pid의_run_기록은_record_finished가_건드리지_않는다(config, conn, caplog):
+    import logging
+
+    record_started(conn, "scheduler", fake_lock(), now=T0)
+    run = state(conn, "runtime_run:scheduler")
+    run["pid"] = os.getpid() + 1                      # 나중에 시작한 다른 프로세스가 덮은 기록
+    conn.execute("UPDATE app_state SET value = ? WHERE key = 'runtime_run:scheduler'", (json.dumps(run),))
+    conn.commit()
+    before = get_state(conn, "runtime_run:scheduler")
+
+    with caplog.at_level(logging.DEBUG, logger="targeting_agent.scheduler.runtime_state"):
+        record_finished(conn, "scheduler", "OK", now=T0 + timedelta(minutes=1))
+
+    assert get_state(conn, "runtime_run:scheduler") == before
+    assert "Runtime 종료 기록 생략" in caplog.text and f"pid={os.getpid() + 1}" in caplog.text
+
+
+def test_run_기록이_없으면_record_finished는_만들지_않는다(conn):
+    record_finished(conn, "scheduler", "OK", now=T0)
+
+    assert get_state(conn, "runtime_run:scheduler") is None
+
+
+# --- L3 / L4. 읽기 쪽 방어 ------------------------------------------------------
+def test_stale_minutes가_잘못된_값이어도_읽기는_죽지_않고_기본값을_쓴다(config, conn, caplog):
+    import logging
+
+    from targeting_agent.dashboard import queries
+
+    raw = json.loads(json.dumps(config.raw))
+    raw["scheduler"]["lock"]["stale_minutes"] = "30m"
+    cfg = Config(raw=raw, path=config.path, base_dir=config.base_dir)
+    record_started(conn, "scheduler", fake_lock(), now=T0)
+
+    with caplog.at_level(logging.WARNING, logger="targeting_agent.scheduler.runtime_state"):
+        status = collect_runtime_status(conn, cfg, now=T0 + timedelta(minutes=60))
+        queries.operational_status(conn, cfg)                # Dashboard 경로도 죽지 않는다
+
+    assert len(status.warnings) == 1 and "기본값 60분" in caplog.text
+
+
+def test_읽기_오류는_조용히_기록_없음이_되지_않고_로그를_남긴다(config, conn, monkeypatch, caplog):
+    import logging
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(runtime_state, "get_state", locked)
+    with caplog.at_level(logging.WARNING, logger="targeting_agent.scheduler.runtime_state"):
+        status = collect_runtime_status(conn, config, now=T0)
+
+    assert "database is locked" in caplog.text
+    assert status.block_summary == NO_RECORD
+
+
+# --- H2. block_summary 의 구분 --------------------------------------------------
+def test_block_summary는_과거_차단과_미종료_의심을_드러낸다(config, conn, tmp_path):
+    cfg = runtime_config(config, tmp_path)
+    # 과거에 차단됐고 지금은 끝난 경우 — '차단 없음(0회)' 로 사라지면 안 된다
+    record_started(conn, "scheduler", fake_lock(), now=T0)
+    for minute in (1, 2, 3):
+        record_blocked(cfg, "scheduler", fake_lock(), conn=conn, now=T0 + timedelta(minutes=minute))
+    record_finished(conn, "scheduler", "OK", now=T0 + timedelta(minutes=50))
+    record_started(conn, "scheduler", fake_lock(), now=T0 + timedelta(hours=2))
+    record_finished(conn, "scheduler", "OK", now=T0 + timedelta(hours=2, minutes=1))
+
+    past = collect_runtime_status(conn, config, now=T0 + timedelta(hours=3))
+    assert past.block_summary == "Scheduler Run 최근 차단 있음(연속 아님)"
+    assert past.warnings == []
+
+    # 아무도 더 시도하지 않는 멈춘 소유자 — 상태바에도 보여야 한다
+    record_started(conn, "autopilot", fake_lock(), now=T0)
+    stuck = collect_runtime_status(conn, config, now=T0 + timedelta(hours=10))
+    assert "Autopilot 미종료 의심" in stuck.block_summary
+    assert "Scheduler Run 최근 차단 있음(연속 아님)" in stuck.block_summary
+
+    # 현재 연속 차단
+    record_blocked(cfg, "autopilot", fake_lock(), conn=conn, now=T0 + timedelta(hours=9))
+    record_blocked(cfg, "autopilot", fake_lock(), conn=conn, now=T0 + timedelta(hours=9, minutes=1))
+    current = collect_runtime_status(conn, config, now=T0 + timedelta(hours=10))
+    assert "Autopilot 차단 2회(연속)" in current.block_summary
+
+
+# --- 판정 #2. 트랜잭션 결합 -----------------------------------------------------
+def file_db_config(config: Config, tmp_path: Path, build) -> Config:
+    cfg = build(Config(raw={**config.raw, "paths": {**config.raw.get("paths", {}),
+                                                    "database": str(tmp_path / "tx.db")}},
+                       path=config.path, base_dir=config.base_dir))
+    return cfg
+
+
+def test_comment_canary는_실패한_Run의_미커밋_승인을_영속시키지_않는다(config, tmp_path, monkeypatch):
+    """record_finished 의 commit 이 approve 루프 도중 실패한 부분 쓰기를 살리면 안 된다."""
+    from targeting_agent.canary import comment_runner
+
+    cfg = file_db_config(config, tmp_path, lambda c: canary_config(c, limit=2))
+    setup = get_connection(cfg.db_path)
+    init_db(setup)
+    queue_comment(setup, code="AAA111", username="creator_a")
+    queue_comment(setup, code="BBB222", username="creator_b")
+    setup.close()
+
+    real, calls = comment_runner.approve_action, []
+
+    def flaky(conn, action_id, **kwargs):
+        calls.append(action_id)
+        if len(calls) == 2:
+            raise RuntimeError("두 번째 승인에서 실패")
+        return real(conn, action_id, **kwargs)
+
+    monkeypatch.setattr(comment_runner, "approve_action", flaky)
+
+    result = run_comment_canary(cfg, now=T0, page=CommentPage())
+
+    assert result.outcome == "FAILED" and len(calls) == 2
+    check = get_connection(cfg.db_path)
+    try:
+        approved = check.execute("SELECT COUNT(*) AS n FROM action_queue WHERE approved_at IS NOT NULL")
+        assert approved.fetchone()["n"] == 0                       # 첫 승인도 영속되지 않았다
+        assert state(check, "runtime_run:comment_canary")["status"] == "FAILED"   # 기록은 남았다
+    finally:
+        check.close()
+
+
+def test_comment_canary는_호출자_conn을_commit하지_않는다(config, conn, monkeypatch):
+    from targeting_agent.canary import comment_runner
+
+    queue_comment(conn)
+
+    def fail_after_write(conn_, *args, **kwargs):
+        conn_.execute("INSERT INTO app_state (key, value, updated_at) VALUES ('probe', '1', 'x')")
+        raise RuntimeError("조회 실패")                         # Run 이 미커밋 쓰기를 남기고 실패
+
+    monkeypatch.setattr(comment_runner, "eligible_comments", fail_after_write)
+
+    result = run_comment_canary(canary_config(config), conn=conn, now=T0, page=CommentPage())
+
+    assert result.outcome == "FAILED"
+    assert state(conn, "runtime_run:comment_canary")["status"] == "FAILED"   # 같은 트랜잭션 안에서는 보인다
+    conn.rollback()
+    assert get_state(conn, "probe") is None                                  # 호출자의 쓰기를 대신 확정하지 않았다
+    assert state(conn, "runtime_run:comment_canary")["status"] is None       # 기록은 호출자 트랜잭션에 합류했다
+
+
+@pytest.mark.parametrize("runtime", ["scheduler", "browser_discovery", "autopilot"])
+def test_나머지_세_runner는_실패한_Run의_부분_쓰기를_영속시킨다(config, tmp_path, monkeypatch, runtime):
+    """의도된 결합을 고정한다: finally 의 commit 이 같은 conn 의 미커밋 쓰기를 확정한다.
+
+    scheduler 는 예전에는 close 가 롤백했고(개선), discovery/autopilot 은 _record_run 이 이미 commit 했다.
+    이 결합이 바뀌면(예: 기록을 별도 연결로 옮기면) 이 테스트가 알려 준다.
+    """
+    from targeting_agent.autopilot import runner as autopilot_runner
+    from targeting_agent.discovery import browser_runner
+    from targeting_agent.scheduler import runner as scheduler_runner
+
+    cfg = runtime_config(config, tmp_path)
+
+    def boom(*args, **kwargs):
+        conn = next(a for a in args if isinstance(a, sqlite3.Connection))
+        conn.execute("INSERT INTO app_state (key, value, updated_at) VALUES ('partial_probe', '1', 'x')")
+        raise RuntimeError("중간 실패")
+
+    target = {
+        "scheduler": (scheduler_runner, "_write_summary", lambda: run_scheduled(cfg, now=T0)),
+        "browser_discovery": (browser_runner, "_resolve_queries",
+                              lambda: run_browser_discovery(cfg, now=T0)),
+        "autopilot": (autopilot_runner, "_stage_expansion", lambda: run_autopilot(cfg, now=T0)),
+    }[runtime]
+    monkeypatch.setattr(target[0], target[1], boom)
+
+    result = target[2]()
+
+    assert result.exit_code == 1                              # 실패한 Run
+    check = get_connection(cfg.db_path)
+    try:
+        assert get_state(check, "partial_probe") == "1"       # 부분 쓰기가 영속됐다(의도된 결합)
+        assert state(check, f"runtime_run:{runtime}")["status"] == "FAILED"
+    finally:
+        check.close()
+
+
+# --- 판정 #5. 산문 입력은 신호가 아니다 ----------------------------------------
+@pytest.mark.parametrize(
+    "reason, expected_state",
+    [
+        ("selector_missing: challenge-dialog not found", None),
+        ("session ok, challenge=false", None),
+        ("CHALLENGE 아님: platform_warning", ActivityState.CAUTION),     # 조각이 신호 이름과 같지 않다
+        ("platform_warning:TRY_AGAIN_LATER / no challenge", ActivityState.CAUTION),
+        ("no challenge detected", None),
+        ("action blocked", None),                      # 공백 형태는 예전에도 매칭되지 않았다(생산자는 밑줄 형식)
+        ("platform_warning:CHALLENGE:LIKE media 1", ActivityState.STOPPED),
+        ("PLATFORM_WARNING / ACTION_BLOCKED", ActivityState.STOPPED),
+        ("LOGIN_REQUIRED", ActivityState.STOPPED),
+    ],
+)
+def test_산문_입력은_거짓_STOPPED를_만들지_않는다(conn, reason, expected_state):
+    result = observe(conn, extract_signal(reason), now=T0)
+
+    assert result is (expected_state or ActivityState.NORMAL), extract_signal(reason)
+    assert extract_signal(reason) not in STOP_SIGNALS or expected_state is ActivityState.STOPPED

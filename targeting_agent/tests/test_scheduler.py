@@ -1206,3 +1206,23 @@ def test_소유자_기록이_비어_있을_때도_blocked_info가_로그_문장�
     assert lock.blocked_info["owner_pid"] is None
     assert lock.blocked_info["recovery"] in caplog.text
     assert "지우지 마십시오" in lock.blocked_info["recovery"]
+
+
+def test_lock_인스턴스를_재사용해도_mode와_blocked_info는_이전_값을_남기지_않는다(tmp_path):
+    path = tmp_path / ".x.lock"
+    lock = SchedulerLock(path=path, stale_minutes=30, label="Autopilot")
+
+    with _holder(path, label="Autopilot", stale_minutes=30):
+        assert lock.acquire() is False
+        assert lock.blocked_info["owner_pid"] is not None        # 실패한 시도의 값
+
+    assert lock.acquire() is True                                # 성공한 시도는 이전 차단 값을 비운다
+    try:
+        assert lock.blocked_info == {} and lock.mode == "KERNEL"
+    finally:
+        lock.release()
+    assert lock.mode == ""                                       # 해제하면 소유 방식도 없다
+
+    with _holder(path, label="Autopilot", stale_minutes=30):
+        assert lock.acquire() is False
+        assert lock.mode == ""                                   # 이전 성공의 mode 가 남지 않는다

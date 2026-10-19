@@ -390,7 +390,7 @@ def test_상태바_Runtime_차단_기록없음_0회_차단있음_세_경우(conn
     record_blocked(config, "autopilot", lock, conn=conn, now=t0)
     record_blocked(config, "autopilot", lock, conn=conn, now=t0 + timedelta(minutes=1))
     page = render(conn, config, Page(tab="review", filters={}), token="t")
-    assert "Autopilot 2회" in _runtime_item(page)
+    assert "Autopilot 차단 2회(연속)" in _runtime_item(page)
     assert "%" not in _runtime_item(page)
 
 
@@ -408,3 +408,35 @@ def test_상태바_Runtime_차단_값은_escape된다(conn, config, monkeypatch)
 
     assert "<script>alert(1)</script>" not in page
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in _runtime_item(page)
+
+
+def test_상태바는_과거_차단과_미종료_의심을_차단_없음으로_덮지_않는다(conn, config) -> None:
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from targeting_agent.scheduler.runtime_state import (
+        record_blocked,
+        record_finished,
+        record_started,
+    )
+
+    now = datetime.now(timezone.utc)
+    lock = SimpleNamespace(
+        mode="KERNEL", path=Path("/x/.lock"),
+        blocked_info={"mode": "KERNEL", "path": "/x/.lock", "owner_pid": 1,
+                      "owner_created_at": "x", "stale_minutes": 30, "recovery": "r"},
+    )
+
+    # 과거에 막혔고 지금은 끝난 경우: '차단 없음(0회)' 이 아니다
+    record_started(conn, "scheduler", lock, now=now - timedelta(hours=3))
+    record_blocked(config, "scheduler", lock, conn=conn, now=now - timedelta(hours=3, minutes=-1))
+    record_started(conn, "scheduler", lock, now=now - timedelta(hours=2))
+    record_finished(conn, "scheduler", "OK", now=now - timedelta(hours=2, minutes=-1))
+    item = _runtime_item(render(conn, config, Page(tab="review", filters={}), token="t"))
+    assert "최근 차단 있음(연속 아님)" in item and "차단 없음(0회)" not in item
+
+    # 아무도 더 시도하지 않는 멈춘 소유자: 상태바에 보인다
+    record_started(conn, "autopilot", lock, now=now - timedelta(hours=10))
+    item = _runtime_item(render(conn, config, Page(tab="review", filters={}), token="t"))
+    assert "Autopilot 미종료 의심" in item

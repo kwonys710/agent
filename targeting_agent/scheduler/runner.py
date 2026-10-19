@@ -32,7 +32,7 @@ from ..core.logger import get_logger
 from ..core.models import MediaStatus
 from ..discovery.ingest import CandidateIngestor, ImportSummary
 from .lock import SchedulerLock
-from .runtime_state import record_blocked, record_finished, record_started
+from .runtime_state import lock_stale_minutes, record_blocked, record_finished, record_started
 from .summary import build_summary_data, cleanup_old_reports, render_summary_html, write_summary
 
 logger = get_logger("scheduler.runner")
@@ -123,7 +123,7 @@ def run_scheduled(
 
     lock = SchedulerLock(
         path=config._resolve_path(config.get("scheduler.lock.path", "data/.scheduler.lock")),
-        stale_minutes=int(config.get("scheduler.lock.stale_minutes", 60)),
+        stale_minutes=lock_stale_minutes(config, "scheduler"),
         enabled=bool(config.get("scheduler.lock.enabled", True)),
     )
     if not lock.acquire(now):
@@ -161,6 +161,8 @@ def run_scheduled(
         result.message = str(exc)[:300]
     finally:
         result.finished_at = utc_now()
+        # 트랜잭션 결합: record_finished 는 conn 을 commit 한다. 예전에는 실패한 Run 의 미커밋 쓰기가
+        # close 에서 롤백됐지만 지금은 영속된다(tests/test_runtime_events.py 가 이 결합을 고정한다).
         record_finished(conn, "scheduler", result.status, result.message)
         lock.release()
         if owns_connection and conn is not None:

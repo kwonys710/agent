@@ -24,7 +24,12 @@ from ..core.database import bump_stat, get_connection, init_db, today_str, utc_n
 from ..core.exceptions import BrowserSessionError, TargetingError
 from ..core.logger import get_logger
 from ..scheduler.lock import SchedulerLock
-from ..scheduler.runtime_state import record_blocked, record_finished, record_started
+from ..scheduler.runtime_state import (
+    lock_stale_minutes,
+    record_blocked,
+    record_finished,
+    record_started,
+)
 from .browser_models import SOURCE_BROWSER_SEARCH, SessionState
 from .ingest import ADDED, DUPLICATE, CandidateIngestor, ImportSummary
 from .novelty import NoveltyStats, record_discovery
@@ -272,7 +277,7 @@ def run_browser_discovery(
         path=config._resolve_path(
             config.get("browser_discovery.lock.path", "data/.browser_discovery.lock")
         ),
-        stale_minutes=int(config.get("browser_discovery.lock.stale_minutes", 30)),
+        stale_minutes=lock_stale_minutes(config, "browser_discovery"),
         enabled=bool(config.get("browser_discovery.lock.enabled", True)),
         label="Browser Discovery",
     )
@@ -337,6 +342,7 @@ def run_browser_discovery(
                 _record_run(conn, result)
             except sqlite3.Error:  # pragma: no cover - 이력 기록 실패가 Run을 실패로 만들지 않는다
                 logger.warning("Discovery 이력 기록 실패(무시)")
+            # 트랜잭션 결합: 위 _record_run 이 이미 같은 conn 을 commit 하므로 commit 시점은 달라지지 않는다.
             record_finished(conn, "browser_discovery", result.status, result.stop_reason or result.message)
         lock.release()
         if owns_connection and conn is not None:
