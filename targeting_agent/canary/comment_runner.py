@@ -35,6 +35,7 @@ from ..core.database import (
 )
 from ..core.logger import get_logger
 from ..scheduler.lock import SchedulerLock
+from ..scheduler.runtime_state import record_blocked, record_finished, record_started
 from .comment_executor import CommentOnlyExecutor, build_comment_only_executor
 from .resume import is_real_instagram_target
 
@@ -198,6 +199,7 @@ def run_comment_canary(
         result.outcome = OUTCOME_LOCKED
         result.messages.append("다른 Canary가 진행 중이어서 종료합니다.")
         result.finished_at = utc_now()
+        record_blocked(config, "comment_canary", lock, conn=conn, now=moment)
         return result
 
     owns_connection = conn is None
@@ -206,6 +208,7 @@ def run_comment_canary(
         if conn is None:
             conn = get_connection(config.db_path)
             init_db(conn)
+        record_started(conn, "comment_canary", lock, now=moment)
 
         # --- 계정 건강 상태: NORMAL이 아니면 시작하지 않는다 -----------------
         activity = activity_status(conn, config, now=moment)
@@ -277,6 +280,9 @@ def run_comment_canary(
         result.messages.append(str(exc)[:300])
     finally:
         result.finished_at = utc_now()
+        record_finished(
+            conn, "comment_canary", result.outcome, result.stop_reason or "; ".join(result.messages)[:200]
+        )
         lock.release()
         if owns_connection and conn is not None:
             conn.close()
@@ -293,9 +299,9 @@ def run_comment_canary(
 
 
 def _observe_signal(conn: sqlite3.Connection, reason: str) -> None:
-    from ..actions.activity import observe
+    from ..actions.activity import extract_signal, observe
 
-    token = str(reason or "").split(":", 1)[0].strip().upper()
+    token = extract_signal(reason)
     if token and token != "UNKNOWN_COMMENT_STATE":
         observe(conn, token)
 

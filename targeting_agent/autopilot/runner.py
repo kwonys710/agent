@@ -21,7 +21,13 @@ from typing import Any, Callable, Optional
 
 from ..actions.controller import ActionController
 from ..actions.executors import create_executor
-from ..actions.activity import ActivityState, ActivityStatus, effective_config, observe
+from ..actions.activity import (
+    ActivityState,
+    ActivityStatus,
+    effective_config,
+    extract_signal,
+    observe,
+)
 from ..actions.activity import status as activity_status
 from ..actions.policy import (
     ActionPolicy,
@@ -49,6 +55,7 @@ from ..discovery.browser_runner import BrowserDiscoveryResult, run_browser_disco
 from ..discovery.ingest import CandidateIngestor, ImportSummary
 from ..pipeline import next_run_id
 from ..scheduler.lock import SchedulerLock
+from ..scheduler.runtime_state import record_blocked, record_finished, record_started
 
 logger = get_logger("autopilot.runner")
 
@@ -154,6 +161,7 @@ def run_autopilot(
         result.status = STATUS_LOCKED
         result.message = "다른 Autopilot이 진행 중이어서 종료합니다."
         result.finished_at = utc_now()
+        record_blocked(config, "autopilot", lock, conn=conn, now=now)
         logger.info(result.message)
         return result
 
@@ -163,6 +171,7 @@ def run_autopilot(
             conn = get_connection(config.db_path)
             init_db(conn)
         result.run_id = next_run_id(conn)
+        record_started(conn, "autopilot", lock, run_id=result.run_id, now=now)
         date = today_str(int(config.get("actions.daily_limits.timezone_offset_hours", 9)))
 
         logger.info(
@@ -202,6 +211,7 @@ def run_autopilot(
                 _record_run(conn, result)
             except sqlite3.Error:  # pragma: no cover - 이력 기록 실패는 무시
                 logger.warning("Autopilot 이력 기록 실패(무시)")
+            record_finished(conn, "autopilot", result.status, result.halt_reason or result.message)
         lock.release()
         if owns_connection and conn is not None:
             conn.close()
@@ -435,8 +445,7 @@ def _stage_execute(
         result.halt_reason = result.halt_reason or summary.halt_reason
         result.status = STATUS_STOPPED
         # 플랫폼 신호는 활동 상태를 악화 방향으로만 바꾼다(자동 증가 없음).
-        signal = str(summary.halt_reason or "").split(":", 1)[0].strip().upper()
-        result.activity_state = observe(conn, signal).value
+        result.activity_state = observe(conn, extract_signal(summary.halt_reason)).value
     result.real_writes = _count_real_writes(conn, result.run_id)
     result.note(
         f"execute:성공 {summary.success} / 보류 {summary.skipped} / 실패 {summary.failed}"

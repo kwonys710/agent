@@ -82,6 +82,7 @@ def operational_status(conn: sqlite3.Connection, config: Any) -> dict[str, Any]:
     기존 화면을 재설계하지 않고 한 줄 상태만 덧붙이기 위한 최소 조회다.
     """
     from ..actions.policy import RunMode, usage_note
+    from ..scheduler.runtime_state import collect_runtime_status
 
     mode = RunMode.from_config(config)
     executor_mode = str(config.get("browser_executor.mode", "DRY_RUN")).upper()
@@ -120,6 +121,8 @@ def operational_status(conn: sqlite3.Connection, config: Any) -> dict[str, Any]:
             if autopilot_row
             else "실행 기록 없음"
         ),
+        # 차단(LOCKED)은 run 테이블에 없다 — 기록이 없으면 "기록 없음", 있고 0이면 "차단 없음(0회)".
+        "runtime_blocked": collect_runtime_status(conn, config).block_summary,
         "ai_provider": str(config.get("ai.provider", "heuristic")),
         "usage": usage_note(config, conn),
         "awaiting_approval": int(

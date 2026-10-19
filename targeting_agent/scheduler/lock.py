@@ -137,6 +137,15 @@ class SchedulerLock:
     # 다시 읽으면 acquire 때와 어긋날 수 있다. 폴백 claim은 쥔 락이 없어 None이다.
     _unlock: Optional[tuple] = None
     _payload: dict = field(default_factory=dict)
+    # acquire()가 False를 돌려준 뒤 호출자가 읽는다(읽기 전용). _log_blocked가 운영자에게 보여 주는
+    # 값(소유자 pid·생성 시각·복구 안내 문장)을 그대로 담는다 — 호출자가 문구를 다시 쓰지 않게 한다.
+    # lock은 DB를 쓰지 않는다: 이 값을 기록하는 일은 호출자 몫이다.
+    blocked_info: dict = field(default_factory=dict)
+
+    @property
+    def mode(self) -> str:
+        """획득에 성공했을 때의 소유 방식(KERNEL / TTL_FALLBACK). 못 잡았거나 비활성이면 빈 값."""
+        return self._mode
 
     def acquire(self, now: Optional[datetime] = None) -> bool:
         """lock을 잡으면 True. 다른 실행이 진행 중이면 False. 파일 I/O 실패는 LockIOError."""
@@ -334,6 +343,15 @@ class SchedulerLock:
             else f"커널 락 없이(TTL 판정) 소유된 lock이라 TTL({self.stale_minutes}분) 경과 후 자동 회수됩니다. "
             "lock 파일을 지우지 마십시오(지우면 두 실행이 동시에 돌 수 있습니다)."
         )
+        self.blocked_info = {
+            "label": self.label,
+            "path": str(self.path),
+            "mode": mode,
+            "owner_pid": None,
+            "owner_created_at": None,
+            "stale_minutes": self.stale_minutes,
+            "recovery": recovery,
+        }
         if held is UNREADABLE:
             logger.warning(
                 "다른 %s이 진행 중입니다(소유자 기록을 읽을 수 없습니다(락 보유 중), "
@@ -342,18 +360,22 @@ class SchedulerLock:
             )
             return
         held = held or {}
+        self.blocked_info["owner_pid"] = held.get("pid")
+        self.blocked_info["owner_created_at"] = held.get("created_at")
         if mode == MODE_KERNEL and held.get("pid") is None and not held.get("created_at"):
             # 락은 충돌인데 소유자 기록이 비어 있다. 정상 소유자라면 자리바이트와 payload 사이
             # 수 마이크로초에만 보이는 상태다. 반복되면 FS의 락 보고 오류다. 종료할 pid가 없으므로
             # '프로세스를 종료하라'고 하지 않고, 운영자가 실제로 할 수 있는 행동을 적는다.
-            logger.warning(
+            message = (
                 "다른 %s이 락을 쥐고 있다고 보고되지만 소유자 기록이 비어 있습니다(lock=%s, mode=%s). "
                 "초기화 중인 정상 실행이면 곧 사라지는 일시 상태입니다. 이 로그가 실행마다 반복되면 "
                 "파일시스템의 락 보고 오류일 가능성이 높습니다 — 실행 중인 %s 프로세스가 없는지 "
                 "확인하고, 없는데 반복되면 lock 경로를 락을 지원하는 로컬 디스크로 옮기도록 운영자에게 "
-                "알리십시오. lock 파일을 지우지 마십시오(지우면 두 실행이 동시에 돌 수 있습니다).",
-                self.label, self.path, mode, self.label,
+                "알리십시오. lock 파일을 지우지 마십시오(지우면 두 실행이 동시에 돌 수 있습니다)."
             )
+            args = (self.label, self.path, mode, self.label)
+            self.blocked_info["recovery"] = message % args  # 로그에 찍히는 안내와 같은 문장
+            logger.warning(message, *args)
             return
         age = self._age_seconds(held, now)
         too_long = age is not None and age >= max(self.stale_minutes, 1) * 60

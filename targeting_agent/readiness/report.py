@@ -23,6 +23,7 @@ from typing import Any, Mapping, Optional
 
 from ..core.config import Config
 from ..core.logger import get_logger
+from ..scheduler.runtime_state import collect_runtime_status
 from .audit import collect_audit, collect_chain
 from .calibration import CONFIDENCE_HIGH, CONFIDENCE_INSUFFICIENT, collect_calibration
 from .comments import collect_comment_calibration
@@ -213,6 +214,10 @@ def build_readiness(
     chain = collect_chain(conn)
 
     health_rows, health_warnings = _health_rows(baseline, calibration, comments, config)
+    runtime = collect_runtime_status(conn, config, now=now)
+    # 관측 신호는 risks 로만 보낸다(blockers·NO_GO 로 승격 금지). _classify 전에 넣어야
+    # risks 가 비어야 GO 라는 판정에 반영된다 — 경고가 있으면 GO 가 CONDITIONAL_GO 로 내려간다.
+    report.risks.extend(runtime.warnings)
 
     mode = effective_mode(config)
     report.config_state = {
@@ -239,6 +244,7 @@ def build_readiness(
             "후보→실행 사슬": f"{len(chain)}건 검사 · 끊김 {len(broken)}건",
         },
         "Live Canary": canary_rows,
+        "Runtime 실행 / 차단": {row["label"]: row["text"] for row in runtime.rows},
         "설정 상태": report.config_state,
     }
 

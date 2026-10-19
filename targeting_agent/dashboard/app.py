@@ -146,6 +146,7 @@ def _status_bar(conn: sqlite3.Connection, config: Config) -> str:
         ("승인 대기", f'{status["awaiting_approval"]}건'),
         ("최근 Discovery", status["discovery_last"]),
         ("최근 Autopilot", status["autopilot_last"]),
+        ("Runtime 차단", status["runtime_blocked"]),
     ]
     rows = "".join(
         f'<div class="statusitem"><span>{e(label)}</span><b>{e(value)}</b></div>'

@@ -4,8 +4,9 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from targeting_agent.core.config import Config
 from targeting_agent.dashboard import queries
@@ -355,3 +356,70 @@ def test_action_실패는_품질_신호가_아니라_실행_건강이다(config:
 
     assert signals == {}          # 품질 신호로 쓰지 않는다
     assert metrics.failed == 1    # 실행 건강 지표로 센다
+
+
+# --- Runtime 차단/미종료 관측은 KPI 를 바꾸지 않는다 (P1-B) ---------------------
+def test_LOCKED와_미종료_기록은_모든_KPI_집계를_바꾸지_않는다(
+    config: Config, conn: sqlite3.Connection, tmp_path
+):
+    """차단·미종료는 app_state 에만 남는다. run 테이블에 행이 생기면 분모/분자가 바뀐다."""
+    from targeting_agent.learning.metrics import collect_health_metrics
+    from targeting_agent.readiness.snapshot import collect_baseline
+    from targeting_agent.scheduler.lock import SchedulerLock
+    from targeting_agent.scheduler.runtime_state import record_started
+
+    from .test_runtime_events import RUNTIMES, fake_lock, runtime_config
+    from .test_scheduler import _config as scheduler_config
+    from .test_scheduler import _run
+
+    fixed = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    insert_discovery_run(conn)
+    insert_discovery_run(conn, status="FAILED", errors=2, collected=0, added=0, duplicate=0)
+    insert_autopilot_run(conn)
+    _run(conn, scheduler_config(config, tmp_path), now=fixed)  # scheduled_runs 에 실제 행 1개
+
+    def snapshot() -> dict:
+        status = queries.operational_status(conn, config)
+        status.pop("runtime_blocked")                      # 이번에 추가한 표시 키만 제외한다
+        tables = ("scheduled_runs", "browser_discovery_runs", "autopilot_runs", "action_queue",
+                  "interactions", "daily_stats", "candidate_media")
+        return {
+            "discovery": dataclasses.asdict(collect_discovery_metrics(conn)),
+            "executor": dataclasses.asdict(collect_executor_metrics(conn)),
+            "health": dataclasses.asdict(collect_health_metrics(conn, config)),
+            "baseline": dataclasses.asdict(collect_baseline(conn, now=fixed)),
+            "operational_status": status,
+            "rows": {t: conn.execute(f"SELECT * FROM {t}").fetchall() for t in tables},
+        }
+
+    def frozen(snap: dict) -> dict:
+        snap = dict(snap)
+        snap["rows"] = {t: [tuple(r) for r in rows] for t, rows in snap["rows"].items()}
+        return snap
+
+    before = frozen(snapshot())
+    assert before["health"]["scheduler_runs"] == 1
+
+    cfg = runtime_config(config, tmp_path)
+    holders = []
+    try:
+        for lock_file, label, _run_fn, _table in RUNTIMES.values():
+            holder = SchedulerLock(path=tmp_path / lock_file, label=label)
+            assert holder.acquire() is True
+            holders.append(holder)
+        for runtime, (_f, _l, run_fn, _t) in RUNTIMES.items():
+            assert run_fn(cfg, conn, fixed).exit_code == 0     # LOCKED 4종
+    finally:
+        for holder in holders:
+            holder.release()
+    record_started(conn, "scheduler", fake_lock(), now=fixed - timedelta(hours=5))  # 미종료 1건
+    record_started(conn, "autopilot", fake_lock(), now=fixed - timedelta(hours=5))
+
+    # 비교가 공허하지 않은지: 관측 기록은 실제로 남았다
+    keys = {r["key"] for r in conn.execute("SELECT key FROM app_state")}
+    assert {f"runtime_block:{name}" for name in RUNTIMES} <= keys
+    assert {"runtime_run:scheduler", "runtime_run:autopilot"} <= keys
+    assert queries.operational_status(conn, config)["runtime_blocked"] != "기록 없음"
+
+    assert frozen(snapshot()) == before
+

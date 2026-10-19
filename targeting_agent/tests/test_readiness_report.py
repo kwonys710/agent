@@ -270,3 +270,127 @@ def test_판정은_설정을_바꾸지_않는다(conn: sqlite3.Connection, confi
 
     assert config.raw["actions"]["execution"] == before
     assert config.get("browser_executor.mode") == "DRY_RUN"
+
+
+# ===========================================================================
+# Runtime 실행 / 차단 (P1-B)
+# ===========================================================================
+SECTION = "Runtime 실행 / 차단"
+
+
+def _fake_lock():
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        mode="KERNEL", path=Path("/x/.lock"),
+        blocked_info={"mode": "KERNEL", "path": "/x/.lock", "owner_pid": 4242,
+                      "owner_created_at": "2026-10-19T00:00:00+00:00", "stale_minutes": 30,
+                      "recovery": "프로세스를 종료하면 즉시 해제됩니다. lock 파일을 지우지 마십시오."},
+    )
+
+
+def _block(conn: sqlite3.Connection, config: Config, runtime: str, times: int, base) -> None:
+    from datetime import timedelta
+
+    from targeting_agent.scheduler.runtime_state import record_blocked
+
+    for index in range(times):
+        record_blocked(config, runtime, _fake_lock(), conn=conn, now=base + timedelta(minutes=index))
+
+
+def test_Runtime_섹션이_있고_기록이_없으면_기록_없음이다(conn: sqlite3.Connection, config: Config):
+    _healthy(conn, feedback=12)
+
+    report = build_readiness(conn, config)
+
+    assert set(report.sections[SECTION]) == {
+        "Scheduler", "Browser Discovery", "Autopilot", "COMMENT Canary"
+    }
+    assert set(report.sections[SECTION].values()) == {"기록 없음"}
+    assert report.verdict == GO                     # 기록이 없다는 이유로 판정이 바뀌지 않는다
+
+
+def test_단발_LOCKED는_경고하지_않고_GO를_유지한다(conn: sqlite3.Connection, config: Config):
+    from datetime import datetime, timezone
+
+    _healthy(conn, feedback=12)
+    _block(conn, config, "browser_discovery", 1, datetime(2026, 10, 19, tzinfo=timezone.utc))
+
+    report = build_readiness(conn, config, now=datetime(2026, 10, 19, 1, tzinfo=timezone.utc))
+
+    assert report.verdict == GO
+    assert not any("Browser Discovery" in item for item in report.risks)
+    assert "차단 1회(연속)" in report.sections[SECTION]["Browser Discovery"]
+
+
+def test_연속_차단은_risk_한_줄이고_blockers_NO_GO로_가지_않는다(
+    conn: sqlite3.Connection, config: Config
+):
+    from datetime import datetime, timezone
+
+    _healthy(conn, feedback=12)
+    _block(conn, config, "browser_discovery", 2, datetime(2026, 10, 19, tzinfo=timezone.utc))
+
+    report = build_readiness(conn, config, now=datetime(2026, 10, 19, 1, tzinfo=timezone.utc))
+
+    mine = [item for item in report.risks if "Browser Discovery" in item and "연속 차단" in item]
+    assert len(mine) == 1 and "pid=4242" in mine[0]
+    assert not report.blockers and report.technical == READY
+    assert report.verdict == CONDITIONAL_GO         # 부작용: risks 가 비지 않아 GO 에서 내려간다
+    assert "차단 2회(연속)" in report.sections[SECTION]["Browser Discovery"]
+
+
+def test_미종료_실행은_stale_초과일_때만_risk다(conn: sqlite3.Connection, config: Config):
+    from datetime import datetime, timedelta, timezone
+
+    from targeting_agent.scheduler.runtime_state import record_started
+
+    _healthy(conn, feedback=12)
+    start = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    record_started(conn, "autopilot", _fake_lock(), now=start)    # autopilot stale 60분
+
+    early = build_readiness(conn, config, now=start + timedelta(minutes=59))
+    late = build_readiness(conn, config, now=start + timedelta(minutes=60))
+
+    assert not any("미종료" in item for item in early.risks) and early.verdict == GO
+    assert sum("미종료(멈춤 또는 비정상 종료)" in item for item in late.risks) == 1
+    assert not late.blockers and late.verdict == CONDITIONAL_GO
+
+
+def test_Runtime_신호는_blockers로_승격되지_않는다(conn: sqlite3.Connection, config: Config):
+    from datetime import datetime, timedelta, timezone
+
+    from targeting_agent.scheduler.runtime_state import record_started
+
+    _healthy(conn, feedback=12)
+    start = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    for runtime in ("scheduler", "autopilot"):
+        record_started(conn, runtime, _fake_lock(), now=start)
+        _block(conn, config, runtime, 3, start + timedelta(minutes=1))
+
+    report = build_readiness(conn, config, now=start + timedelta(days=2))
+
+    assert report.blockers == [] and report.verdict != NO_GO
+    assert len([item for item in report.risks if "Runtime" in item or "연속 차단" in item]) >= 2
+
+
+def test_Runtime_섹션은_html에서_escape된다(conn: sqlite3.Connection, config: Config):
+    from datetime import datetime, timezone
+
+    _healthy(conn, feedback=12)
+    hostile = _fake_lock()
+    hostile.blocked_info["recovery"] = "<script>alert(1)</script>"
+    from targeting_agent.scheduler.runtime_state import record_blocked
+
+    for minute in (0, 1):
+        record_blocked(config, "scheduler", hostile, conn=conn,
+                       now=datetime(2026, 10, 19, 0, minute, tzinfo=timezone.utc))
+
+    text = render_readiness_html(
+        build_readiness(conn, config, now=datetime(2026, 10, 19, 1, tzinfo=timezone.utc))
+    )
+
+    assert "<script>alert(1)</script>" not in text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
+    assert SECTION in text

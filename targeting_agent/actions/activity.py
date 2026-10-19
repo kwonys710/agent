@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,27 @@ class ActivityState(str, Enum):
 STOP_SIGNALS = frozenset({"ACTION_BLOCKED", "CHALLENGE", "LOGIN_REQUIRED"})
 # 주의로 올리는 신호(= CAUTION)
 CAUTION_SIGNALS = frozenset({"PLATFORM_WARNING", "TRY_AGAIN_LATER", "UNKNOWN"})
+
+
+def extract_signal(reason: Optional[str]) -> str:
+    """사유 문자열에서 **가장 심각한** 플랫폼 신호를 찾는다(판정은 이 함수 한 곳이다).
+
+    Controller는 실제 사유를 `platform_warning:<사유>` 로 감싼다. 첫 토큰만 읽으면 래퍼 라벨이
+    안쪽의 CHALLENGE 를 가려 STOPPED 가 CAUTION 으로 강등된다. 그래서 STOP 신호 → CAUTION 신호
+    순으로 문자열 안에서 찾고, 둘 다 없으면 예전처럼 첫 토큰을 돌려준다.
+    UNKNOWN_COMMENT_STATE 처럼 신호 이름을 포함할 뿐인 토큰은 경계 검사로 걸러진다.
+    """
+    text = str(reason or "").upper()
+    for group in (STOP_SIGNALS, CAUTION_SIGNALS):
+        found = [
+            (match.start(), name)
+            for name in group
+            for match in [re.search(rf"(?<![A-Z0-9_]){name}(?![A-Z0-9_])", text)]
+            if match
+        ]
+        if found:
+            return min(found)[1]
+    return text.split(":", 1)[0].strip()
 
 
 @dataclass

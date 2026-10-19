@@ -349,3 +349,62 @@ def test_queue_and_stats_tabs_render(conn, config) -> None:
 
     stats_html = render(conn, config, Page(tab="stats"), token="t")
     assert "GOOD_TARGET" in stats_html and "수동 입력" in stats_html
+
+
+# --- Runtime 차단 상태바 (P1-B) ---------------------------------------------
+def _runtime_item(html: str) -> str:
+    start = html.index("Runtime 차단")
+    return html[start:html.index("</div>", start)]
+
+
+def test_상태바_Runtime_차단_기록없음_0회_차단있음_세_경우(conn, config) -> None:
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from targeting_agent.scheduler.runtime_state import (
+        record_blocked,
+        record_finished,
+        record_started,
+    )
+
+    t0 = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    lock = SimpleNamespace(
+        mode="KERNEL", path=Path("/x/.lock"),
+        blocked_info={"mode": "KERNEL", "path": "/x/.lock", "owner_pid": 1,
+                      "owner_created_at": "x", "stale_minutes": 30, "recovery": "r"},
+    )
+
+    # 1) 기록 없음 — 표본이 없는 것이지 0 이 아니다
+    page = render(conn, config, Page(tab="review", filters={}), token="t")
+    assert "기록 없음" in _runtime_item(page)
+    assert queries.operational_status(conn, config)["runtime_blocked"] == "기록 없음"
+
+    # 2) 실행 기록은 있고 차단은 없음 — 실제 0
+    record_started(conn, "scheduler", lock, now=t0)
+    record_finished(conn, "scheduler", "OK", now=t0 + timedelta(minutes=1))
+    page = render(conn, config, Page(tab="review", filters={}), token="t")
+    assert "차단 없음(0회)" in _runtime_item(page)
+
+    # 3) 차단 있음 — 비율이 아니라 횟수(연속)
+    record_blocked(config, "autopilot", lock, conn=conn, now=t0)
+    record_blocked(config, "autopilot", lock, conn=conn, now=t0 + timedelta(minutes=1))
+    page = render(conn, config, Page(tab="review", filters={}), token="t")
+    assert "Autopilot 2회" in _runtime_item(page)
+    assert "%" not in _runtime_item(page)
+
+
+def test_상태바_Runtime_차단_값은_escape된다(conn, config, monkeypatch) -> None:
+    from targeting_agent.dashboard import queries as dashboard_queries
+
+    real = dashboard_queries.operational_status
+
+    def hostile(c, cfg):
+        return {**real(c, cfg), "runtime_blocked": "<script>alert(1)</script>"}
+
+    monkeypatch.setattr(dashboard_queries, "operational_status", hostile)
+
+    page = render(conn, config, Page(tab="review", filters={}), token="t")
+
+    assert "<script>alert(1)</script>" not in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in _runtime_item(page)

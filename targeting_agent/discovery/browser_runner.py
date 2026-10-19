@@ -24,6 +24,7 @@ from ..core.database import bump_stat, get_connection, init_db, today_str, utc_n
 from ..core.exceptions import BrowserSessionError, TargetingError
 from ..core.logger import get_logger
 from ..scheduler.lock import SchedulerLock
+from ..scheduler.runtime_state import record_blocked, record_finished, record_started
 from .browser_models import SOURCE_BROWSER_SEARCH, SessionState
 from .ingest import ADDED, DUPLICATE, CandidateIngestor, ImportSummary
 from .novelty import NoveltyStats, record_discovery
@@ -279,6 +280,7 @@ def run_browser_discovery(
         result.status = STATUS_LOCKED
         result.message = "다른 Browser Discovery가 진행 중이어서 종료합니다."
         result.finished_at = utc_now()
+        record_blocked(config, "browser_discovery", lock, conn=conn, now=now)
         logger.info(result.message)
         return result
 
@@ -288,6 +290,7 @@ def run_browser_discovery(
         if conn is None:
             conn = get_connection(config.db_path)
             init_db(conn)
+        record_started(conn, "browser_discovery", lock, now=now)
 
         query_list, result.query_source = _resolve_queries(conn, config, queries)
         result.planned_queries = list(query_list)
@@ -334,6 +337,7 @@ def run_browser_discovery(
                 _record_run(conn, result)
             except sqlite3.Error:  # pragma: no cover - 이력 기록 실패가 Run을 실패로 만들지 않는다
                 logger.warning("Discovery 이력 기록 실패(무시)")
+            record_finished(conn, "browser_discovery", result.status, result.stop_reason or result.message)
         lock.release()
         if owns_connection and conn is not None:
             conn.close()

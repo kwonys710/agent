@@ -1162,3 +1162,47 @@ def test_5개_Runtime_모두_실제_락을_쥔_상태에서는_각자의_LOCKED�
     finally:
         for held in holders:
             held.release()
+
+
+# --- P1-B. 차단 정보를 호출자에게 그대로 전달 ----------------------------------------
+def test_blocked_info는_로그에_찍힌_값과_같은_내용이다(tmp_path, caplog):
+    path = tmp_path / ".browser_discovery.lock"
+    lock = SchedulerLock(path=path, stale_minutes=30, label="Browser Discovery")
+    assert lock.blocked_info == {}                    # 차단 전에는 비어 있다
+
+    with _holder(path, label="Browser Discovery", stale_minutes=30) as child:
+        with caplog.at_level(logging.INFO):
+            assert lock.acquire() is False
+
+    info = lock.blocked_info
+    assert info["label"] == "Browser Discovery"
+    assert info["path"] == str(path)
+    assert info["mode"] == "KERNEL"
+    assert info["owner_pid"] == child.pid
+    assert info["owner_created_at"] == _payload(path)["created_at"]
+    assert info["stale_minutes"] == 30
+    # 복구 안내는 lock 이 만든 문장 그대로다 — 로그에도 같은 문장이 있다.
+    assert "지우지 마십시오" in info["recovery"]
+    assert info["recovery"] in caplog.text
+    assert str(child.pid) in caplog.text and str(info["owner_pid"]) in caplog.text
+    assert lock.mode == ""                            # 못 잡았으므로 소유 방식은 없다
+
+
+def test_소유에_성공하면_mode가_노출되고_blocked_info는_비어_있다(tmp_path):
+    lock = SchedulerLock(path=tmp_path / ".x.lock", stale_minutes=30)
+    assert lock.acquire() is True
+    try:
+        assert lock.mode == "KERNEL" and lock.blocked_info == {}
+    finally:
+        lock.release()
+
+
+def test_소유자_기록이_비어_있을_때도_blocked_info가_로그_문장을_담는다(tmp_path, caplog):
+    path = tmp_path / ".x.lock"
+    lock = SchedulerLock(path=path, stale_minutes=30, label="Autopilot")
+    with caplog.at_level(logging.INFO):
+        lock._log_blocked({}, datetime.now(timezone.utc), mode="KERNEL")
+
+    assert lock.blocked_info["owner_pid"] is None
+    assert lock.blocked_info["recovery"] in caplog.text
+    assert "지우지 마십시오" in lock.blocked_info["recovery"]

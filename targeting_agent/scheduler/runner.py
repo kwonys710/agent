@@ -32,6 +32,7 @@ from ..core.logger import get_logger
 from ..core.models import MediaStatus
 from ..discovery.ingest import CandidateIngestor, ImportSummary
 from .lock import SchedulerLock
+from .runtime_state import record_blocked, record_finished, record_started
 from .summary import build_summary_data, cleanup_old_reports, render_summary_html, write_summary
 
 logger = get_logger("scheduler.runner")
@@ -129,6 +130,7 @@ def run_scheduled(
         result.status = STATUS_LOCKED
         result.message = "다른 Scheduled Run이 진행 중이어서 종료합니다."
         result.finished_at = utc_now()
+        record_blocked(config, "scheduler", lock, conn=conn, now=now)
         logger.info(result.message)
         return result
 
@@ -137,6 +139,7 @@ def run_scheduled(
         if conn is None:
             conn = get_connection(config.db_path)
             init_db(conn)
+        record_started(conn, "scheduler", lock, now=now)
 
         tz = int(config.get("actions.daily_limits.timezone_offset_hours", 9))
         date = today_str(tz)
@@ -158,6 +161,7 @@ def run_scheduled(
         result.message = str(exc)[:300]
     finally:
         result.finished_at = utc_now()
+        record_finished(conn, "scheduler", result.status, result.message)
         lock.release()
         if owns_connection and conn is not None:
             conn.close()
