@@ -45,6 +45,7 @@ from .state import (
     STOPPED_ACTION_BLOCK,
     STOPPED_CHALLENGE,
     STOPPED_LOGIN,
+    STOPPED_SAFETY,
     STOPPED_UNKNOWN_WRITE,
     STOPPED_VIOLATION,
     STOPPED_WARNING,
@@ -67,7 +68,6 @@ OUTCOME_TOO_SOON = "TOO_SOON"
 OUTCOME_EXPIRED = "WINDOW_EXPIRED"
 OUTCOME_TERMINAL = "ALREADY_FINISHED"
 OUTCOME_NO_CANDIDATES = "NO_ELIGIBLE_CANDIDATES"
-OUTCOME_SESSION = "SESSION_NOT_READY"
 OUTCOME_STOPPED = "STOPPED"
 
 # 중단 사유 문자열 → Canary 상태. **구체적인 것부터** 본다.
@@ -79,6 +79,10 @@ _STOP_STATUS: tuple[tuple[str, str], ...] = (
     ("CHALLENGE", STOPPED_CHALLENGE),
     ("LOGIN_REQUIRED", STOPPED_LOGIN),
     ("PLATFORM_WARNING", STOPPED_WARNING),
+    # Executor가 세션을 쓸 수 없다고만 알려 준 경우. validate_session()은 bool만 돌려주므로
+    # 로그인 만료인지 Challenge/경고인지 여기서는 알 수 없다 — 원인을 추측해 LOGIN/WARNING으로
+    # 적지 않고 SAFETY로 멈춘다(사유 문자열은 stop_reason에 그대로 남는다).
+    ("EXECUTOR_SESSION_INVALID", STOPPED_SAFETY),
 )
 
 # canonical_url은 **그 게시물을 실제로 열어** link[rel=canonical]을 읽었을 때만
@@ -127,7 +131,7 @@ class CanaryRunResult:
 
     @property
     def exit_code(self) -> int:
-        return 1 if self.outcome in (OUTCOME_SESSION, OUTCOME_STOPPED) else 0
+        return 1 if self.outcome == OUTCOME_STOPPED else 0
 
     def as_rows(self) -> dict[str, str]:
         return {
@@ -357,7 +361,9 @@ def _stop_status_for(reason: str) -> str:
     for marker, status in _STOP_STATUS:
         if marker in upper:
             return status
-    return STOPPED_WARNING
+    # 인식하지 못한 사유를 특정 신호(경고 등)처럼 기록하지 않는다. 안전 중단으로 두고 드러낸다.
+    logger.warning("인식하지 못한 중단 사유 — STOPPED_SAFETY로 기록합니다: %s", reason)
+    return STOPPED_SAFETY
 
 
 def _finish(

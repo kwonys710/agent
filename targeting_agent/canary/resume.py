@@ -24,11 +24,21 @@ from typing import Any, Optional
 from ..core.config import Config
 from ..core.database import get_connection, init_db, today_str
 from ..core.logger import get_logger
+from ..discovery.browser_runner import (
+    STATUS_DISABLED,
+    STATUS_EMPTY,
+    STATUS_FAILED,
+    STATUS_LOCKED,
+    STATUS_PARTIAL,
+    STATUS_SESSION_STOPPED,
+    STATUS_SUCCESS,
+)
 from .runner import (
     OUTCOME_EXECUTED,
     OUTCOME_NO_CANDIDATES,
     CanaryRunResult,
     _eligible_actions,
+    _stop_status_for,
     run_canary,
 )
 from .state import (
@@ -38,6 +48,7 @@ from .state import (
     STOPPED_SAFETY,
     WAITING_AI_BUDGET,
     WAITING_ELIGIBLE,
+    WAITING_NEXT_RUN,
     CanaryState,
     arm,
     load_state,
@@ -80,6 +91,25 @@ def is_real_instagram_target(url: str, media_id: str = "") -> bool:
 
 
 @dataclass
+class DiscoveryOutcome:
+    """Discovery 1회의 결과 중 Resume이 판단에 쓰는 것만.
+
+    `status`는 Discovery의 값 **그대로**다(STATUS_*). Canary 상태로 복사하지 않는다 —
+    Discovery의 FAILED와 Canary의 FAILED(영구 종료)는 이름만 같다.
+    """
+
+    status: str = STATUS_FAILED
+    stop_reason: str = ""
+    message: str = ""
+    added: int = 0
+    analyzed: int = 0
+
+
+# Discovery가 실제로 검색을 돌려 본 결과(후보가 없을 수는 있다). 이때만 "후보 없음"이 의미를 갖는다.
+_RAN_STATUSES = frozenset({STATUS_SUCCESS, STATUS_PARTIAL, STATUS_EMPTY})
+
+
+@dataclass
 class ResumeResult:
     """깨어나서 어디까지 갔는지."""
 
@@ -95,6 +125,9 @@ class ResumeResult:
     rehearsal_ok: Optional[bool] = None
     live: Optional[CanaryRunResult] = None
     messages: list[str] = field(default_factory=list)
+    # Discovery가 돌려준 원래 상태. Canary 상태(status)와 섞이지 않게 따로 둔다.
+    source_status: str = ""
+    source_stop_reason: str = ""
 
     @property
     def ai_remaining(self) -> int:
@@ -104,6 +137,13 @@ class ResumeResult:
     def exit_code(self) -> int:
         return 1 if self.step == STEP_BLOCKED else 0
 
+    def _source_text(self) -> str:
+        if not self.source_status:
+            return "-"
+        if self.source_stop_reason:
+            return f"{self.source_status} ({self.source_stop_reason})"
+        return self.source_status
+
     def as_rows(self) -> dict[str, str]:
         rows = {
             "단계": self.step,
@@ -111,10 +151,11 @@ class ResumeResult:
             "사유": self.reason or "-",
             "Claude 한도": f"{self.ai_used} / {self.ai_limit} (남음 {self.ai_remaining})",
             "자격 후보(>=임계값)": str(self.eligible),
-            "실제 후보 최고점": (
+            "실제 후보 최고점(DB 누적)": (
                 f"{self.highest_score:.2f}" if self.highest_score is not None else "-"
             ),
             "이번에 새로 찾은 후보": str(self.discovered),
+            "Discovery 상태": self._source_text(),
             "리허설": {None: "미수행", True: "통과", False: "실패"}[self.rehearsal_ok],
         }
         if self.live is not None:
@@ -159,10 +200,14 @@ def _eligible_summary(conn: sqlite3.Connection, config: Config) -> tuple[int, Op
     return eligible, (float(best[0]) if best and best[0] is not None else None)
 
 
-def _run_discovery(config: Config, conn: sqlite3.Connection, *, budget: int) -> tuple[int, int]:
+def _run_discovery(
+    config: Config, conn: sqlite3.Connection, *, budget: int
+) -> DiscoveryOutcome:
     """제한된 Discovery + 분석을 1회 수행한다(기존 구현 재사용).
 
     새 Discovery 구조를 만들지 않는다. 한도는 남은 Claude 예산을 넘지 않는다.
+    (added, analyzed)로 줄이지 않는다 — 상태를 버리면 LOCKED·차단·실패가 모두
+    "후보 없음"으로 읽힌다.
     """
     from ..discovery.browser_runner import run_browser_discovery
 
@@ -187,7 +232,54 @@ def _run_discovery(config: Config, conn: sqlite3.Connection, *, budget: int) -> 
         base_dir=config.base_dir,
     )
     result = run_browser_discovery(runtime, conn, process=True)
-    return int(getattr(result, "added", 0) or 0), int(getattr(result, "analyzed", 0) or 0)
+    status = getattr(result, "status", None)
+    message = str(getattr(result, "message", "") or "")
+    if status not in (
+        *_RAN_STATUSES, STATUS_FAILED, STATUS_SESSION_STOPPED, STATUS_LOCKED, STATUS_DISABLED
+    ):
+        # 값이 없거나 모르는 상태를 성공으로 읽지 않는다(결과 객체의 기본값은 SUCCESS다).
+        message = f"알 수 없는 Discovery 상태({status!r}) {message}".strip()
+        status = STATUS_FAILED
+    stop_reason = getattr(result, "stop_reason", None)
+    return DiscoveryOutcome(
+        status=status,
+        # SessionState(str Enum)이든 문자열이든 값 문자열로 맞춘다.
+        stop_reason=str(getattr(stop_reason, "value", stop_reason) or ""),
+        message=message,
+        added=int(getattr(result, "added", 0) or 0),
+        analyzed=int(getattr(result, "analyzed", 0) or 0),
+    )
+
+
+def _stop_on_discovery_problem(
+    state: CanaryState, result: ResumeResult, outcome: DiscoveryOutcome, moment: datetime
+) -> None:
+    """Discovery가 후보 탐색 자체를 못 한 경우의 상태를 정한다.
+
+    - SESSION_STOPPED: 플랫폼 이상 신호다. 기존 `_stop_status_for` 매핑으로 **종료**한다.
+      종료 상태는 다음 Resume에서 조기 반환되므로 브라우저 Discovery를 다시 열지 않는다.
+    - LOCKED / DISABLED / FAILED: 일시적이다. 종료하지 않고 다음 Run을 기다린다.
+    """
+    detail = f" — {outcome.message}" if outcome.message else ""
+    if outcome.status == STATUS_SESSION_STOPPED:
+        reason = f"discovery_session_stopped:{outcome.stop_reason or 'UNKNOWN'}"
+        state.stop(_stop_status_for(outcome.stop_reason), reason, now=moment)
+        result.step = STEP_BLOCKED
+        result.status, result.reason = state.status, state.stop_reason
+        result.messages.append(f"Discovery 세션 중단({outcome.stop_reason or 'UNKNOWN'}){detail}")
+        return
+    if outcome.status == STATUS_LOCKED:
+        reason = f"Discovery lock 경쟁(다른 Discovery가 진행 중) — 이번엔 실행되지 않았다{detail}"
+        result.step = STEP_NOOP
+    elif outcome.status == STATUS_DISABLED:
+        reason = f"browser_discovery가 비활성화되어 Discovery가 실행되지 않았다{detail}"
+        result.step = STEP_NOOP
+    else:  # STATUS_FAILED
+        reason = f"Discovery 실행 실패({outcome.status}){detail} — 후보 없음이 아니다"
+        result.step = STEP_BLOCKED
+    state.wait(WAITING_NEXT_RUN, reason)
+    result.status, result.reason = state.status, state.last_waiting_reason
+    result.messages.append(f"Discovery 상태 {outcome.status}: 다음 Run에서 다시 시도한다.")
 
 
 def resume_canary(
@@ -270,15 +362,26 @@ def resume_canary(
                 result.ai_remaining,
             )
             try:
-                added, analyzed = _run_discovery(config, conn, budget=result.ai_remaining)
-                result.discovered, result.analyzed = added, analyzed
-                state.discovery_runs += 1
+                outcome = _run_discovery(config, conn, budget=result.ai_remaining)
             except Exception as exc:  # noqa: BLE001 - Discovery 실패가 상태를 망가뜨리지 않게
                 logger.warning("Discovery 실패(%s) — 다음 기회에 다시 시도합니다.", type(exc).__name__)
                 result.messages.append(f"Discovery 실패: {type(exc).__name__}")
+                outcome = DiscoveryOutcome(status=STATUS_FAILED, message=type(exc).__name__)
+            result.source_status = outcome.status
+            result.source_stop_reason = outcome.stop_reason
+            result.discovered, result.analyzed = outcome.added, outcome.analyzed
+            if outcome.status not in (STATUS_LOCKED, STATUS_DISABLED):
+                # Discovery가 실제로 시도된 때만 센다. (현재 이 값을 읽는 코드는 없다 —
+                # 아무도 읽지 않는 카운터는 신호가 아니다. 판단 근거로 쓰지 말 것.)
+                state.discovery_runs += 1
             result.ai_used, result.ai_limit = _ai_usage(conn, config, now=moment)
             result.eligible, result.highest_score = _eligible_summary(conn, config)
             result.step = STEP_DISCOVERED
+            if outcome.status not in _RAN_STATUSES:
+                # 운영 장애를 "후보 없음"으로 바꾸지 않는다.
+                _stop_on_discovery_problem(state, result, outcome, moment)
+                save_state(path, state)
+                return result
 
         # --- 여전히 없으면 기다린다(실패가 아니다) ----------------------------
         if result.eligible == 0:
@@ -292,9 +395,11 @@ def resume_canary(
                 )
                 result.step = STEP_WAITING_BUDGET
             else:
+                # best는 DB 전체 집계이지 이번 실행의 결과가 아니다.
                 state.wait(
                     WAITING_ELIGIBLE,
-                    f"임계값 {threshold:.0f} 이상인 실제 후보가 없다(최고점 {best}) — "
+                    f"임계값 {threshold:.0f} 이상인 실제 후보가 없다"
+                    f"(DB 누적 최고점 {best} — 이번 실행 결과가 아님) — "
                     "임계값을 낮추지 않는다.",
                 )
                 result.step = STEP_WAITING_ELIGIBLE

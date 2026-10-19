@@ -630,6 +630,45 @@ def test_플랫폼_신호는_즉시_중단한다(
     assert state.terminal is True
 
 
+def test_세션이_유효하지_않으면_경고종료가_아니라_사유를_보존한_안전중단이다(
+    conn: sqlite3.Connection, canary_config: Config
+):
+    """validate_session()은 bool만 돌려줘 로그인/Challenge/경고를 구분할 수 없다.
+
+    원인을 추측해 STOPPED_WARNING(또는 LOGIN)으로 적지 않는다.
+    """
+    _seed(conn, count=3)
+    state = arm(CanaryState(), now=NOW)
+
+    class InvalidSession(FakeInner):
+        def validate_session(self) -> bool:
+            return False
+
+    inner = InvalidSession()
+
+    result = run_canary(
+        canary_config, conn=conn, live=True, now=NOW,
+        executor=LikeOnlyExecutor(inner), state=state,
+    )
+
+    assert result.outcome == OUTCOME_STOPPED
+    assert state.status == "STOPPED_SAFETY"
+    assert state.status != "STOPPED_WARNING"
+    assert "executor_session_invalid" in state.stop_reason
+    assert state.terminal is True
+    assert inner.like_calls == []
+
+
+def test_인식하지_못한_중단_사유는_특정_신호처럼_기록되지_않는다():
+    from targeting_agent.canary.runner import _stop_status_for
+
+    assert _stop_status_for("executor_session_invalid:browser") == "STOPPED_SAFETY"
+    assert _stop_status_for("something_new_we_never_saw") == "STOPPED_SAFETY"
+    assert _stop_status_for("") == "STOPPED_SAFETY"
+    # 알려진 신호는 그대로 구분된다.
+    assert _stop_status_for("platform_warning:LOGIN_REQUIRED") == "STOPPED_LOGIN"
+
+
 def test_comment_위반이면_canary를_멈춘다(conn: sqlite3.Connection, canary_config: Config):
     _seed(conn, count=1)
     state = arm(CanaryState(), now=NOW)
