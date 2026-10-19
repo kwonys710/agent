@@ -640,7 +640,10 @@ def test_같은_초에_시작한_소유자를_반복_차단해도_streak이_쌓�
     record_blocked(cfg, "scheduler", fake_lock(), conn=conn, now=T0)
 
     assert state(conn, "runtime_block:scheduler")["streak"] == 2
-    assert len(collect_runtime_status(conn, config, now=T0).warnings) == 1
+    # 소유자가 stale 을 넘기면(=멈춘 소유자) 연속 차단 경고가 나온다
+    status = collect_runtime_status(conn, config, now=T0 + timedelta(minutes=60))
+    assert runtime_row(status, "scheduler")["streak"] == 2
+    assert any("2회 연속 차단" in w for w in status.warnings)
 
 
 def test_손상된_started_at은_연속으로_보지_않고_로그를_남긴다(config, conn, tmp_path, caplog):
@@ -942,3 +945,59 @@ def test_산문_입력은_거짓_STOPPED를_만들지_않는다(conn, reason, ex
 
     assert result is (expected_state or ActivityState.NORMAL), extract_signal(reason)
     assert extract_signal(reason) not in STOP_SIGNALS or expected_state is ActivityState.STOPPED
+
+
+# --- 소유자가 정상 진행 중이면 연속 차단 경고를 보류한다 ------------------------
+def two_blocks(cfg, conn, runtime: str, first) -> None:
+    record_blocked(cfg, runtime, fake_lock(), conn=conn, now=first)
+    record_blocked(cfg, runtime, fake_lock(), conn=conn, now=first + timedelta(minutes=1))
+
+
+def test_소유자가_stale_미만으로_진행_중이면_연속_차단도_경고하지_않고_사실은_남긴다(config, conn, tmp_path):
+    cfg = runtime_config(config, tmp_path)
+    record_started(conn, "scheduler", fake_lock(), now=T0)                # scheduler stale 60분
+    two_blocks(cfg, conn, "scheduler", T0 + timedelta(minutes=10))
+
+    status = collect_runtime_status(conn, config, now=T0 + timedelta(minutes=30))
+
+    assert status.warnings == []
+    row = runtime_row(status, "scheduler")
+    assert row["streak"] == 2 and "차단 2회(연속" in row["text"]
+    assert "소유자 정상 진행 중" in row["text"] and "실행 중 또는 미종료 30분 경과" in row["text"]
+    assert status.block_summary == "Scheduler Run 차단 2회(연속, 소유자 진행 중)"   # '차단 없음(0회)' 로 사라지지 않는다
+
+
+def test_소유자가_stale을_넘기는_경계에서_억제가_풀린다(config, conn, tmp_path):
+    cfg = runtime_config(config, tmp_path)
+    record_started(conn, "scheduler", fake_lock(), now=T0)
+    two_blocks(cfg, conn, "scheduler", T0 + timedelta(minutes=10))
+
+    before = collect_runtime_status(conn, config, now=T0 + timedelta(minutes=60, seconds=-1))
+    at = collect_runtime_status(conn, config, now=T0 + timedelta(minutes=60))
+
+    assert before.warnings == []
+    assert len(at.warnings) == 2                              # 연속 차단 + 미종료 의심, 둘 다 사실이다
+    assert any("2회 연속 차단" in w for w in at.warnings)
+    assert any("미종료(멈춤 또는 비정상 종료) 의심" in w for w in at.warnings)
+    assert "소유자 진행 중" not in at.block_summary
+
+
+def test_소유자_기록이_없는_연속_차단은_억제하지_않는다(config, conn, tmp_path):
+    cfg = runtime_config(config, tmp_path)
+    two_blocks(cfg, conn, "browser_discovery", T0)
+
+    status = collect_runtime_status(conn, config, now=T0 + timedelta(minutes=5))
+
+    assert len(status.warnings) == 1 and "2회 연속 차단" in status.warnings[0]
+
+
+def test_소유자가_정상_종료된_뒤의_연속_차단은_억제하지_않는다(config, conn, tmp_path):
+    cfg = runtime_config(config, tmp_path)
+    record_started(conn, "autopilot", fake_lock(), now=T0)
+    record_finished(conn, "autopilot", "OK", now=T0 + timedelta(minutes=1))
+    two_blocks(cfg, conn, "autopilot", T0 + timedelta(minutes=2))
+
+    status = collect_runtime_status(conn, config, now=T0 + timedelta(minutes=10))
+
+    assert len(status.warnings) == 1 and "2회 연속 차단" in status.warnings[0]
+    assert "소유자 정상 진행 중" not in runtime_row(status, "autopilot")["text"]

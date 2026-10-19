@@ -205,7 +205,8 @@ class RuntimeStatus:
         parts = []
         for r in self.rows:
             if r["streak"]:
-                parts.append(f"{r['label']} 차단 {r['streak']}회(연속)")
+                note = ", 소유자 진행 중" if r["owner_running"] else ""
+                parts.append(f"{r['label']} 차단 {r['streak']}회(연속{note})")
             elif r["has_block"]:
                 parts.append(f"{r['label']} 최근 차단 있음(연속 아님)")
             if r["suspect"]:
@@ -242,8 +243,15 @@ def collect_runtime_status(
         minutes = int((now - started).total_seconds() // 60) if unfinished and started else 0
         suspect = bool(unfinished and started and minutes >= stale)
         block_age = int((now - blocked).total_seconds() // 60) if streak and blocked else 0
-        # 연속 차단 경고는 마지막 차단이 너무 오래되지 않았을 때만(나이 상한).
-        streak_alarm = streak >= BLOCK_STREAK_WARNING and block_age <= stale * BLOCK_WARNING_MAX_AGE_FACTOR
+        # 소유자가 stale_minutes 안에서 정상 진행 중이면 차단은 lock 이 제 일을 한 것이다 — 경고하지 않는다
+        # (결함은 소유자가 멈췄을 때뿐이고 그건 suspect 가 잡는다). 사실은 행/요약에 남기고 warnings 만 억제한다.
+        owner_running = bool(unfinished and started and minutes < stale)
+        # 연속 차단 경고는 마지막 차단이 너무 오래되지 않았을 때만(나이 상한), 소유자가 정상 진행 중이 아닐 때만.
+        streak_alarm = (
+            streak >= BLOCK_STREAK_WARNING
+            and block_age <= stale * BLOCK_WARNING_MAX_AGE_FACTOR
+            and not owner_running
+        )
 
         if not run and not block:
             text = NO_RECORD
@@ -255,7 +263,10 @@ def collect_runtime_status(
             else:
                 last = "완료 기록 없음"
             if streak:
-                blk = f"차단 {streak}회(연속, 마지막 {_short(block.get('blocked_at'))})"
+                blk = (
+                    f"차단 {streak}회(연속, 마지막 {_short(block.get('blocked_at'))}"
+                    f"{', 소유자 정상 진행 중이라 경고 보류' if owner_running else ''})"
+                )
             elif block:
                 blk = f"최근 차단 {_short(block.get('blocked_at'))}(이후 실행 있음)"
             else:
@@ -270,7 +281,7 @@ def collect_runtime_status(
                 unf = "미종료 없음"
             text = f"{last} · {blk} · {unf}"
         out.rows.append({"runtime": runtime, "label": label, "text": text, "streak": streak,
-                         "suspect": suspect, "has_block": bool(block),
+                         "suspect": suspect, "owner_running": owner_running, "has_block": bool(block),
                          "has_record": bool(run or block)})
         if streak_alarm:
             out.warnings.append(

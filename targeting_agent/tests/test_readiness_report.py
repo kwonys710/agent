@@ -417,3 +417,24 @@ def test_Canary_최고점은_resume의_질의를_재사용한다():
 
     assert "_eligible_summary" in inspect.getsource(report._canary_rows)
     assert "MAX(target_score)" not in inspect.getsource(report._canary_rows)
+
+
+def test_소유자가_정상_진행_중이면_연속_차단이어도_GO를_유지한다(conn: sqlite3.Connection, config: Config):
+    """cadence 보다 오래 걸리는 정상 Run 때문에 LOCKED 가 쌓여도 GO 가 사라지지 않는다."""
+    from datetime import datetime, timedelta, timezone
+
+    from targeting_agent.scheduler.runtime_state import record_started
+
+    _healthy(conn, feedback=12)
+    start = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    record_started(conn, "autopilot", _fake_lock(), now=start)            # autopilot stale 60분
+    _block(conn, config, "autopilot", 2, start + timedelta(minutes=10))
+
+    report = build_readiness(conn, config, now=start + timedelta(minutes=30))
+
+    assert report.verdict == GO
+    assert not any("연속 차단" in item or "미종료" in item for item in report.risks)
+    assert "차단 2회(연속" in report.sections[SECTION]["Autopilot"]       # 사실은 보고서에 남는다
+
+    stuck = build_readiness(conn, config, now=start + timedelta(minutes=60))
+    assert stuck.verdict == CONDITIONAL_GO and not stuck.blockers
