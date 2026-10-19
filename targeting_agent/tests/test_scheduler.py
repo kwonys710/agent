@@ -469,3 +469,39 @@ def test_lock_로그에_어느_실행인지_나온다(tmp_path, caplog):
     assert "Scheduled Run" not in message
     assert "12428" in message
     assert str(path) in message  # 어느 파일을 지워야 하는지 알려 준다
+
+
+def test_모든_runtime이_lock_소유자_이름을_넘긴다():
+    """lock을 쓰는 Runtime은 자기 이름을 넘겨야 한다.
+
+    Scheduler만 기본값("Scheduled Run")을 쓴다. 다른 Runtime이 기본값에 의존하면
+    차단 로그가 엉뚱한 주체를 가리켜, 운영자가 stale lock 원인을 잘못 짚는다.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    기본값_허용 = {root / "scheduler" / "runner.py"}
+
+    사용처 = []
+    for source in sorted(root.rglob("*.py")):
+        if "tests" in source.parts:
+            continue
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            이름 = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if 이름 != "SchedulerLock":
+                continue
+            사용처.append(source)
+            if source in 기본값_허용:
+                continue
+            labels = [kw for kw in node.keywords if kw.arg == "label"]
+            assert labels, f"{source.relative_to(root)}:{node.lineno} 가 label을 넘기지 않는다"
+            assert isinstance(labels[0].value, ast.Constant) and labels[0].value.value, (
+                f"{source.relative_to(root)}:{node.lineno} 의 label이 비어 있다"
+            )
+
+    assert len(사용처) >= 5  # 사용처를 지나치게 좁게 찾고 있지 않은지 자체 점검

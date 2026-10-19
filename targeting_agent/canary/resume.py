@@ -211,6 +211,7 @@ def resume_canary(
         path=config._resolve_path("data/.canary_resume.lock"),
         stale_minutes=int(config.get("autopilot.lock.stale_minutes", 60)),
         enabled=bool(config.get("autopilot.lock.enabled", True)),
+        label="Canary Resume",
     )
     if not lock.acquire(moment):
         result.step = STEP_NOOP

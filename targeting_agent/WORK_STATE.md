@@ -22,6 +22,8 @@ Phase 19 완료 (Multi-Agent Discovery & Engagement Upgrade) + 지속 개선 체
   실행당 1건 상한, `--comment-canary` 직접 실행에서만 동작.
 - **Lock 소유자 표기** (`04b40ef`) — 차단 로그에 어느 실행·어느 PID·어느 파일인지와 복구 안내.
 - **지속 개선 체계** — `CLAUDE.md`, `.claude/agents/` 7개 역할, ledger 2개 문서.
+- **Canary Resume lock 소유자 표기** — 재검토에서 발견한 누락분. lock 사용처 전수를
+  검사하는 회귀 테스트 추가 (`continuous_improvement.md` 1번 Follow-up).
 
 ## Runtime Config (실제 쓰기 관련)
 
@@ -58,7 +60,7 @@ LIVE 전환은 운영자 판단이며 `browser_executor.mode`와 `actions.execut
 
 ## Last Regression
 
-`python -m pytest targeting_agent/tests -q` → **830 passed** (2026-10-19)
+`python -m pytest targeting_agent/tests -q` → **831 passed** (2026-10-19)
 
 실제 Instagram / Claude CLI 호출 0, Task Scheduler 변경 0.
 
