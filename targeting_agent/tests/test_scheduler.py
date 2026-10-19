@@ -735,6 +735,26 @@ def test_T12b_락_바이트를_읽을_수_없어도_offset_1로_읽는다(tmp_pa
     holder.release()
 
 
+def test_읽기는_항상_offset_1을_먼저_시도하고_예전_형식만_전체를_다시_읽는다(tmp_path, monkeypatch):
+    new_fmt = tmp_path / "new.lock"
+    new_fmt.write_text(' {"pid": 11, "created_at": "2026-01-01T00:00:00+00:00"}', encoding="utf-8")
+    old_fmt = tmp_path / "old.lock"
+    old_fmt.write_text('{"pid": 22, "created_at": "2026-01-01T00:00:00+00:00"}', encoding="utf-8")
+    real = lockmod._read_bytes
+    offsets: list[int] = []
+
+    def spy(p, offset):
+        offsets.append(offset)
+        return real(p, offset)
+
+    monkeypatch.setattr(lockmod, "_read_bytes", spy)
+    assert SchedulerLock(path=new_fmt)._read()["pid"] == 11
+    assert offsets == [1]                                    # 새 형식: offset 1 한 번
+    offsets.clear()
+    assert SchedulerLock(path=old_fmt)._read()["pid"] == 22
+    assert offsets == [1, 0]                                 # 예전 형식: offset 1 실패 후 전체
+
+
 def test_예전_형식_lock_파일도_pid를_읽는다(tmp_path):
     """자리바이트 없는 예전 `{...}` 파일은 offset 1에서 첫 글자가 잘리므로 전체를 다시 읽는다."""
     path = tmp_path / ".scheduler.lock"
@@ -808,8 +828,9 @@ def test_T9_Windows_분기_EINVAL은_UNKNOWN이라_TTL_폴백한다(tmp_path, mo
     assert "released_at" in _payload(path)
 
 
-def test_T9_방금_만든_파일에서_충돌이_보고되면_UNKNOWN으로_떨어뜨린다(tmp_path, monkeypatch, caplog):
-    """방금 만든 파일을 정당하게 소유한 프로세스는 없다 → 락 영역 오판. 조용한 LOCKED를 막는다."""
+def test_T9_방금_만든_파일에서_충돌이_보고되고_기록이_비어_있으면_차단한다(tmp_path, monkeypatch, caplog):
+    """방금 만든 파일에서 충돌 = 락 영역 오판 신호(UNKNOWN). 그래도 기록이 비어 있으면
+    다른 실행이 초기화 중일 수 있으므로 회수하지 않고 건너뛴다(2중 실행 방지)."""
     import errno
 
     _use_windows_locker(monkeypatch, FakeMsvcrt(fail_errno=errno.EACCES))
@@ -817,8 +838,55 @@ def test_T9_방금_만든_파일에서_충돌이_보고되면_UNKNOWN으로_떨�
     assert not path.exists()
     with caplog.at_level(logging.INFO):
         lock = SchedulerLock(path=path)
-        assert lock.acquire() is True
+        assert lock.acquire() is False
+    assert path.read_bytes() == b" "                          # 자리바이트뿐, 덮어쓰지 않았다
     assert "mode=TTL_FALLBACK" in caplog.text and "락 영역 오판" in caplog.text
+    assert "초기화 중인 것으로 보여 이번 실행은 건너뜁니다" in caplog.text
+    assert lock._fd is None and lock._acquired is False
+
+
+def _contended_after_writing(record: dict):
+    """락 시도 직전에 '다른 실행'이 payload를 써 두고 충돌을 보고하는 locker(경쟁 모사)."""
+    import errno
+
+    def lock(fd, mod):
+        data = b" " + json.dumps(record).encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, data)
+        return lockmod.CONTENDED, f"errno={errno.EACCES}"
+
+    return (lock, lambda fd, mod: None, None)
+
+
+def test_T9_방금_만든_파일이어도_기록이_있으면_일반_TTL_폴백_의미를_따른다(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    fresh = tmp_path / "fresh.lock"
+    monkeypatch.setattr(
+        lockmod, "_LOCKER",
+        _contended_after_writing({"pid": 4242, "created_at": now.isoformat(timespec="seconds")}),
+    )
+    assert SchedulerLock(path=fresh, stale_minutes=60).acquire() is False   # 신선한 기록 → 차단
+
+    released = tmp_path / "released.lock"
+    monkeypatch.setattr(
+        lockmod, "_LOCKER",
+        _contended_after_writing(
+            {"pid": 4242, "created_at": now.isoformat(timespec="seconds"),
+             "released_at": now.isoformat(timespec="seconds")}
+        ),
+    )
+    lock = SchedulerLock(path=released, stale_minutes=60)
+    assert lock.acquire() is True                                           # 해제된 기록 → 인수
+    lock.release()
+
+
+def test_일반_폴백은_빈_기록도_회수한다(tmp_path, monkeypatch):
+    """안전망을 거치지 않은 UNKNOWN(EINVAL 등)에서는 새 파일의 빈 기록을 stale로 본다(탈출구)."""
+    import errno
+
+    _use_windows_locker(monkeypatch, FakeMsvcrt(fail_errno=errno.EINVAL))
+    lock = SchedulerLock(path=tmp_path / ".scheduler.lock")
+    assert lock.acquire() is True
     lock.release()
 
 

@@ -161,10 +161,12 @@ class SchedulerLock:
                 raise self._io_error("lock 파일 초기화에 실패했습니다", exc) from exc
 
             state, detail = self._try_lock(fd)
+            guarded = False  # 안전망을 거쳐 UNKNOWN이 됐는가(일반 TTL 폴백과 구분한다)
             if state == CONTENDED and created:
                 # 방금 만든 파일을 정당하게 소유한 프로세스는 없다 → 락 영역 오판 신호.
                 # 여기서 막으면 매 실행이 조용히 LOCKED/exit 0 이 된다.
                 state = UNKNOWN
+                guarded = True
                 detail = f"방금 만든 lock 파일에서 락 충돌이 보고됨({detail}) — 락 영역 오판 의심"
 
             if state == CONTENDED:
@@ -180,7 +182,7 @@ class SchedulerLock:
                     self.label, MODE_KERNEL, os.getpid(), self.path,
                 )
             else:
-                if not self._fallback_claim(fd, now, detail):
+                if not self._fallback_claim(fd, now, detail, guarded=guarded):
                     return False
                 self._mode = MODE_TTL_FALLBACK
 
@@ -249,8 +251,13 @@ class SchedulerLock:
         except OSError as exc:
             raise self._io_error("lock 기록을 쓰지 못했습니다", exc) from exc
 
-    def _fallback_claim(self, fd: int, now: datetime, reason: str) -> bool:
-        """락 판정이 불가능할 때만: 예전 TTL 판정. True면 기록까지 마쳤다."""
+    def _fallback_claim(self, fd: int, now: datetime, reason: str, *, guarded: bool = False) -> bool:
+        """락 판정이 불가능할 때만: 예전 TTL 판정. True면 기록까지 마쳤다.
+
+        guarded=True(방금 만든 파일에서 충돌이 보고된 경우)에는 기록이 없거나 읽을 수 없을 때
+        회수하지 않는다. 다른 실행이 막 락을 잡고 payload를 쓰기 전일 수 있어, 회수하면 2중 실행이다.
+        한 번 건너뛰는 쪽이 안전하다.
+        """
         logger.warning(
             "%s lock 기반 판정 비활성 mode=%s reason=%s — TTL(%d분) 판정으로 폴백합니다.",
             self.label, MODE_TTL_FALLBACK, reason, self.stale_minutes,
@@ -258,6 +265,16 @@ class SchedulerLock:
         held = self._read()
         if held is UNREADABLE:
             self._log_blocked(held, now, mode=MODE_TTL_FALLBACK)
+            return False
+        if guarded and (
+            held is None or (held.get("pid") is None and not held.get("created_at"))
+        ):
+            logger.warning(
+                "%s lock 소유자 기록이 비어 있습니다 — 다른 실행이 초기화 중인 것으로 보여 "
+                "이번 실행은 건너뜁니다(lock=%s). 이 로그가 매번 반복되면 파일시스템의 락 보고가 "
+                "잘못된 것입니다. lock 파일을 지우지 마십시오.",
+                self.label, self.path,
+            )
             return False
         if held is not None:
             if self._is_stale(held, now):
