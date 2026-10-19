@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence
@@ -80,7 +81,28 @@ logger = get_logger("discovery.browser")
 
 # 프로필 보강이 전멸했을 때 WARNING을 내는 최소 표본(비공개가 아니면서 meta를 받은 Creator 수).
 # 1~2건 전멸은 우연일 수 있고 실행당 프로필 상한이 10이라, 3건부터 파서 불일치로 의심한다.
+# 상한(max_profiles_per_run)이 이 값보다 작으면 전멸 판정이 불가능하므로 생략했다고 로그로 밝힌다.
 PROFILE_PARSE_FAIL_WARN_MIN = 3
+
+# 프로필 보강 결과 버킷 — 대상 Creator는 반드시 이 중 하나로 설명된다(profile_accounted).
+PROFILE_FOLLOWERS_PUBLIC = "followers_public"  # 공개 계정에서 followers 확보(점수에 반영된다)
+PROFILE_FOLLOWERS_PRIVATE = "followers_private"  # 비공개 계정에서 followers 확보(후보는 하류에서 탈락)
+PROFILE_PRIVATE_NO_FOLLOWERS = "private_no_followers"  # 비공개이면서 followers 미확보
+PROFILE_PARSE_FAILED = "parse_failed"  # meta는 받았지만 비공개 아닌데 followers 파싱 실패
+PROFILE_UNOPENED = "unopened"  # reader가 None 반환(열지 못함)
+PROFILE_ERRORS = "errors"  # reader 예외
+PROFILE_OVER_LIMIT = "over_limit"  # max_profiles 상한을 넘겨 열지 않음
+PROFILE_NO_USERNAME = "no_username"  # username이 비었거나 unresolved 접두라 열 수 없음
+PROFILE_BUCKETS = (
+    PROFILE_FOLLOWERS_PUBLIC,
+    PROFILE_FOLLOWERS_PRIVATE,
+    PROFILE_PRIVATE_NO_FOLLOWERS,
+    PROFILE_PARSE_FAILED,
+    PROFILE_UNOPENED,
+    PROFILE_ERRORS,
+    PROFILE_OVER_LIMIT,
+    PROFILE_NO_USERNAME,
+)
 
 
 class BrowserPage(Protocol):
@@ -443,7 +465,8 @@ class PlaywrightBrowser:
         """
         url = profile_url(username, base_url=self.base_url)
         if not url:
-            logger.info("프로필 주소를 만들 수 없습니다(%s).", username)
+            # 정상 상태가 아니다 — username 오염이나 코드 결함 신호다.
+            logger.warning("프로필 주소를 만들 수 없습니다(%s).", username)
             return None
         try:
             self.goto(url)
@@ -460,7 +483,7 @@ class PlaywrightBrowser:
             og_description=self._attr_one(OG_DESCRIPTION_SELECTOR, "content"),
             body_text=body,
         )
-        if meta.followers is None and not meta.is_private:
+        if meta.unreadable:
             logger.info("프로필 메타에서 팔로워 수를 읽지 못했습니다(%s).", username)
         return meta
 
@@ -585,13 +608,9 @@ class InstagramBrowserDiscovery(DiscoverySource):
             SessionState.PLATFORM_WARNING: stop_on_warning,
         }
         self.stats = DiscoveryStats()
-        # 프로필 보강 카운터 — 시도한 Creator는 반드시 아래 사유 중 하나로 설명된다.
-        self.profile_attempts = 0  # 루프를 돈 Creator 수
-        self.profile_followers_found = 0  # followers 확보
-        self.profile_private = 0  # 비공개라 followers 없음
-        self.profile_parse_failed = 0  # meta는 받았지만 followers 파싱 실패(비공개 아님)
-        self.profile_unopened = 0  # reader가 None 반환(열지 못함)
-        self.profile_errors = 0  # reader 예외
+        # 프로필 보강 관측값 — Run(_enrich_followers 호출)마다 리셋한다.
+        self.profile_creators = 0  # 상류에서 센 대상 Creator 수(루프와 독립)
+        self.profile_counts: Counter[str] = Counter()  # PROFILE_BUCKETS 별 Creator 수
         # 같은 Run에서 같은 Reel을 찾은 검색어들(19D: 후보 행은 하나, 검색어는 여러 개).
         # 키는 shortcode다 — /p/ 와 /reel/ 두 형태가 같은 게시물을 가리킬 수 있다.
         self._by_code: dict[str, RawCandidate] = {}
@@ -693,29 +712,44 @@ class InstagramBrowserDiscovery(DiscoverySource):
         - 실행당 상한(max_profiles)을 넘지 않는다.
         - 읽지 못하면 0으로 남긴다(지어내지 않는다).
         """
-        if not self.max_profiles or not candidates:
+        self.profile_creators = 0
+        self.profile_counts = Counter()  # 관측은 Run 단위다 — 이전 호출 값을 끌고 오지 않는다.
+        if not self.max_profiles:
+            logger.info("프로필 보강 생략: 비활성(max_profiles=0)")
+            return
+        if not candidates:
+            logger.info("프로필 보강 생략: 대상 후보 없음")
             return
         reader = getattr(self.browser, "read_profile", None)
         if reader is None:
+            logger.info("프로필 보강 생략: 브라우저가 read_profile 을 지원하지 않음")
             return
 
         by_creator: dict[str, list[RawCandidate]] = {}
+        unusable: set[str] = set()
         for candidate in candidates:
             name = str(candidate.username or "")
             if not name or name.startswith(UNRESOLVED_PREFIX):
+                unusable.add(name)
                 continue
             by_creator.setdefault(name, []).append(candidate)
 
-        for username in list(by_creator)[: self.max_profiles]:
-            self.profile_attempts += 1
+        counts = self.profile_counts
+        # 분모는 루프와 독립적으로 상류에서 센다(18A.5 accounted 와 같은 방식).
+        self.profile_creators = len(by_creator) + len(unusable)
+        counts[PROFILE_NO_USERNAME] += len(unusable)
+        usernames = list(by_creator)
+        counts[PROFILE_OVER_LIMIT] += max(0, len(usernames) - self.max_profiles)
+
+        for username in usernames[: self.max_profiles]:
             try:
                 meta = reader(username)
             except Exception as exc:  # noqa: BLE001 - 프로필 1건 실패를 격리한다
                 logger.warning("프로필 읽기 실패(%s): %s", username, type(exc).__name__)
-                self.profile_errors += 1
+                counts[PROFILE_ERRORS] += 1
                 continue
             if meta is None:
-                self.profile_unopened += 1
+                counts[PROFILE_UNOPENED] += 1
                 continue
             for candidate in by_creator[username]:
                 if meta.followers is not None:
@@ -723,55 +757,71 @@ class InstagramBrowserDiscovery(DiscoverySource):
                     candidate.extra["followers_approximate"] = bool(meta.approximate)
                 if meta.is_private:
                     candidate.is_private = True
+            # 비공개 여부와 followers 는 독립이다 — 비공개 계정도 followers 가 읽힐 수 있다.
             if meta.followers is not None:
-                self.profile_followers_found += 1
-            elif meta.is_private:
-                self.profile_private += 1
+                counts[PROFILE_FOLLOWERS_PRIVATE if meta.is_private else PROFILE_FOLLOWERS_PUBLIC] += 1
+            elif meta.unreadable:
+                counts[PROFILE_PARSE_FAILED] += 1
             else:
-                self.profile_parse_failed += 1
-        logger.info(
-            "프로필 보강: 시도 %d · 팔로워 확보 %d · 비공개 %d · 파싱실패 %d · 열지못함 %d · 오류 %d",
-            self.profile_attempts,
-            self.profile_followers_found,
-            self.profile_private,
-            self.profile_parse_failed,
-            self.profile_unopened,
-            self.profile_errors,
-        )
+                counts[PROFILE_PRIVATE_NO_FOLLOWERS] += 1
+
+        breakdown = ", ".join(f"{k}={counts[k]}" for k in PROFILE_BUCKETS)
+        logger.info("프로필 보강: 대상 Creator %d · %s", self.profile_creators, breakdown)
         if not self.profile_accounted():
             # 설명되지 않은 Creator가 있으면 조용히 넘기지 않는다.
             logger.warning(
-                "프로필 보강 집계 불일치: 시도 %d ≠ 확보 %d + 비공개 %d + 파싱실패 %d + 열지못함 %d + 오류 %d",
-                self.profile_attempts,
-                self.profile_followers_found,
-                self.profile_private,
-                self.profile_parse_failed,
-                self.profile_unopened,
-                self.profile_errors,
+                "프로필 보강 집계 불일치: 대상 %d ≠ 사유 합 %d (%s)",
+                self.profile_creators,
+                sum(counts.values()),
+                breakdown,
             )
-        if self.profile_followers_found == 0 and self.profile_parse_failed >= PROFILE_PARSE_FAIL_WARN_MIN:
-            # 비공개 계정만으로 0이 된 경우는 여기에 오지 않는다(분모가 비공개 제외).
+        self._warn_enrichment_failure()
+
+    def _warn_enrichment_failure(self) -> None:
+        """보강이 쓸모없이 끝난 Run을 INFO 한 줄로 묻지 않는다. 원인이 다른 두 신호를 나눠 낸다."""
+        counts = self.profile_counts
+        public_ok = counts[PROFILE_FOLLOWERS_PUBLIC]
+        private_ok = counts[PROFILE_FOLLOWERS_PRIVATE]
+        failed = counts[PROFILE_PARSE_FAILED]
+        if self.max_profiles < PROFILE_PARSE_FAIL_WARN_MIN:
+            if public_ok + private_ok == 0 and failed:
+                # 상한이 표본 최소보다 작으면 전멸을 판정할 수 없다 — 침묵하지 않고 밝힌다.
+                logger.info(
+                    "프로필 보강 전멸 판정 생략: 표본 상한 %d < 판정 최소 %d (파싱실패 %d)",
+                    self.max_profiles,
+                    PROFILE_PARSE_FAIL_WARN_MIN,
+                    failed,
+                )
+            return
+        if public_ok + private_ok == 0 and failed >= PROFILE_PARSE_FAIL_WARN_MIN:
+            # 비공개 계정에서도 한 건도 못 읽었다 — 파서가 의심된다.
+            # 비공개 계정만으로 0이 된 경우(parse_failed 0)는 여기에 오지 않는다.
             logger.warning(
                 "프로필 보강 전멸: 비공개가 아닌 프로필 %d건에서 팔로워를 한 건도 읽지 못했습니다"
-                "(시도 %d · 비공개 %d · 열지못함 %d · 오류 %d). "
+                "(대상 %d · 비공개 %d · 열지못함 %d · 오류 %d). "
                 "Instagram 공개 프로필 메타(og:description) 형식이 파서 기대와 다를 수 있습니다. "
                 "creator_fit은 중립값으로 남습니다.",
-                self.profile_parse_failed,
-                self.profile_attempts,
-                self.profile_private,
-                self.profile_unopened,
-                self.profile_errors,
+                failed,
+                self.profile_creators,
+                counts[PROFILE_PRIVATE_NO_FOLLOWERS],
+                counts[PROFILE_UNOPENED],
+                counts[PROFILE_ERRORS],
+            )
+        elif public_ok == 0 and private_ok > 0 and private_ok + failed >= PROFILE_PARSE_FAIL_WARN_MIN:
+            # 파서는 동작했다(비공개에서 읽었다) — 형식 불일치가 아니다. 쓸 수 있는 보강이 없을 뿐이다.
+            logger.warning(
+                "프로필 보강 무효: 점수에 반영되는 공개 계정 팔로워 확보가 0건입니다"
+                "(비공개에서 확보 %d · 공개 파싱실패 %d · 대상 %d). "
+                "비공개 계정에서만 팔로워를 읽었고 그 후보는 safety.skip_private_accounts 로 탈락하므로 "
+                "creator_fit은 중립값으로 남습니다.",
+                private_ok,
+                failed,
+                self.profile_creators,
             )
 
     def profile_accounted(self) -> bool:
-        """시도한 Creator가 확보/비공개/파싱실패/열지못함/오류 중 하나로 모두 설명되는지."""
-        return self.profile_attempts == (
-            self.profile_followers_found
-            + self.profile_private
-            + self.profile_parse_failed
-            + self.profile_unopened
-            + self.profile_errors
-        )
+        """대상 Creator가 모든 사유 버킷의 합으로 설명되는지(silent drop 감지)."""
+        return self.profile_creators == sum(self.profile_counts.values())
 
     @staticmethod
     def _sample(result: QueryResult, link: str, **fields: str) -> None:

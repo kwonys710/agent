@@ -50,6 +50,11 @@ class ProfileMeta:
     def known(self) -> bool:
         return self.followers is not None
 
+    @property
+    def unreadable(self) -> bool:
+        """비공개가 아닌데 팔로워를 못 읽음 — 파서/형식 불일치가 의심되는 경우."""
+        return self.followers is None and not self.is_private
+
 
 def _to_int(value: str, unit: Optional[str]) -> Optional[int]:
     text = (value or "").replace(",", "").strip()
