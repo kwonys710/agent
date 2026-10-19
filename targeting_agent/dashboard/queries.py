@@ -392,6 +392,26 @@ def _score_text(value: Optional[float]) -> str:
     return "-" if value is None else f"{float(value):.1f}"
 
 
+def score_missing(conn: sqlite3.Connection, config: Any) -> dict[str, str]:
+    """입력 결측(중립값으로 채점된 축) 비율(P2-3, 읽기 전용).
+
+    비율 정의는 readiness.calibration 한 곳에만 있고 여기서는 읽어서 포맷만 한다.
+    주의: collect_calibration은 candidate_media ⋈ media_analysis **전건 스캔**이다.
+    후보가 많아지면 Dashboard 렌더 비용이 늘어난다(캐시는 아직 없다).
+    표본이 없으면 0%가 아니라 "-".
+    """
+    from ..readiness.calibration import collect_calibration
+
+    calibration = collect_calibration(conn, config)
+    rates = calibration.missing_rates()
+    return {
+        "creator_fit": _rate_text(rates["creator_fit"]),
+        "activity": _rate_text(rates["activity"]),
+        "engagement": _rate_text(rates["engagement"]),
+        "coverage": _rate_text(calibration.recorded_coverage),
+    }
+
+
 def discovery_health(
     conn: sqlite3.Connection, *, recent_runs: int = 200, now: Any = None
 ) -> dict[str, Any]:

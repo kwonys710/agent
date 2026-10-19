@@ -19,7 +19,10 @@ from targeting_agent.readiness.calibration import (
     REASON_LOW_SIMILARITY,
     REASON_METADATA_MISSING,
     REASON_UNFIT,
+    MISSING_WARNING_RATE,
+    MIN_MISSING_SAMPLES,
     CandidateScore,
+    ComponentStat,
     collect_calibration,
 )
 
@@ -127,7 +130,11 @@ def _insert(
     followers: int,
     posted_at: str | None,
     similarity: float = 0.9,
+    source: str = "instagram_browser_search",
+    missing_inputs: list[str] | None = None,
+    creator_fit: float | None = None,
 ) -> None:
+    # missing_inputs=None 이면 P2-3 이전 레거시 행(키 없음)을 만든다.
     # creators.followers는 NOT NULL이라 "모름"이 0으로 저장된다(실기와 같다).
     cursor = conn.execute(
         "INSERT INTO creators (username, followers, status, first_seen_at, updated_at) "
@@ -139,13 +146,14 @@ def _insert(
         """INSERT INTO candidate_media
            (media_id, creator_id, permalink, canonical_url, media_type, caption, hashtags,
             source, status, posted_at, discovered_at, updated_at)
-           VALUES (?, ?, ?, ?, 'REEL', '', '[]', 'instagram_browser_search', 'SCORED',
+           VALUES (?, ?, ?, ?, 'REEL', '', '[]', ?, 'SCORED',
                    ?, '2026-10-01', '2026-10-01')""",
         (
             media_id,
             creator_id,
             f"https://www.instagram.com/reel/{media_id}/",
             f"https://www.instagram.com/reel/{media_id}/",
+            source,
             posted_at,
         ),
     )
@@ -163,6 +171,11 @@ def _insert(
         "language_region": 1.0,
         "novelty": 1.0,
     }
+    if creator_fit is not None:
+        components["creator_fit"] = creator_fit
+    breakdown = {"components": components, "weights": WEIGHTS, "total": score}
+    if missing_inputs is not None:
+        breakdown["missing_inputs"] = missing_inputs
     conn.execute(
         """INSERT INTO media_analysis
            (media_pk, analyzer, analyzer_version, prompt_version, payload, similarity,
@@ -172,7 +185,7 @@ def _insert(
             media_pk,
             similarity,
             score,
-            json.dumps({"components": components, "weights": WEIGHTS, "total": score}),
+            json.dumps(breakdown),
         ),
     )
 
@@ -300,3 +313,191 @@ def test_저점수_표본은_상한건수를_지킨다(conn: sqlite3.Connection,
     rows = sample_rows(collect_calibration(conn, config), limit=limit)
 
     assert len(rows) == min(limit, 5)
+
+
+# --- P2-3: 결측 기록 -------------------------------------------------------
+def test_저장된_결측_플래그가_이후_보강보다_우선한다(conn: sqlite3.Connection, config: Config):
+    """채점 당시 followers를 몰랐다는 사실은 나중에 보강해도 바뀌지 않는다."""
+    _insert(
+        conn, "AAA111", score=68.0, followers=0, posted_at="2026-10-01",
+        missing_inputs=["creator_fit", "engagement"],
+    )
+    conn.execute("UPDATE creators SET followers = 19000")
+
+    item = collect_calibration(conn, config).candidates[0]
+
+    assert set(item.unknown) == {"creator_fit", "engagement"}
+    assert item.unknown_source == "recorded"
+
+
+def test_레거시_행은_추정_폴백이고_커버리지는_섞인_분모를_보고한다(
+    conn: sqlite3.Connection, config: Config
+):
+    _insert(conn, "AAA111", score=68.0, followers=0, posted_at=None)  # 레거시
+    _insert(conn, "BBB222", score=72.0, followers=0, posted_at="2026-10-01")  # 레거시
+    _insert(
+        conn, "CCC333", score=90.0, followers=5000, posted_at="2026-10-01", missing_inputs=[]
+    )
+    _insert(
+        conn, "DDD444", score=90.0, followers=5000, posted_at="2026-10-01", missing_inputs=[]
+    )
+
+    result = collect_calibration(conn, config)
+    by_id = {item.media_id: item for item in result.candidates}
+
+    assert by_id["AAA111"].unknown_source == "estimated"
+    assert set(by_id["AAA111"].unknown) == {"creator_fit", "engagement", "activity"}
+    assert set(by_id["BBB222"].unknown) == {"creator_fit", "engagement"}
+    assert by_id["CCC333"].unknown_source == "recorded"
+    assert result.recorded_coverage == 0.5
+
+
+def test_빈_리스트로_기록된_행은_레거시로_오인되지_않는다(conn: sqlite3.Connection, config: Config):
+    """`[]`는 "기록됐고 결측 없음"이다. is None 과 falsy 를 혼동하면 안 된다.
+
+    followers=0 이라 추정하면 결측이 3개 나오지만, 기록이 우선이므로 비어 있어야 한다.
+    """
+    _insert(conn, "AAA111", score=80.0, followers=0, posted_at=None, missing_inputs=[])
+
+    item = collect_calibration(conn, config).candidates[0]
+
+    assert item.unknown == ()
+    assert item.unknown_source == "recorded"
+
+
+def test_정보없음과_중립값은_다른_수로_표시된다(conn: sqlite3.Connection, config: Config):
+    """creator_fit이 우연히 0.5로 계산된 행은 중립값이지만 '정보 없음'은 아니다."""
+    _insert(
+        conn, "AAA111", score=70.0, followers=5000, posted_at="2026-10-01",
+        missing_inputs=["creator_fit"], creator_fit=0.5,
+    )
+    _insert(
+        conn, "BBB222", score=70.0, followers=300, posted_at="2026-10-01",
+        missing_inputs=[], creator_fit=0.5,
+    )
+
+    stat = collect_calibration(conn, config).components["creator_fit"]
+    row = stat.as_row()
+
+    assert (stat.unknown_count, stat.neutral_count) == (1, 2)
+    assert "정보없음 1/2" in row
+    assert "중립값 2" in row
+
+
+def test_표본_없는_축은_표본_없음으로_표시한다():
+    assert ComponentStat(name="creator_fit").as_row() == "표본 없음"
+
+
+def _fill_browser(conn: sqlite3.Connection, total: int, missing: int, source: str = "instagram_browser_search"):
+    for index in range(total):
+        flagged = ["creator_fit"] if index < missing else []
+        _insert(
+            conn, f"{source[:3]}{index:03d}", score=80.0, followers=5000,
+            posted_at="2026-10-01", source=source, missing_inputs=flagged,
+        )
+
+
+def test_경고_상수는_설계_값이다():
+    assert MIN_MISSING_SAMPLES == 20
+    assert MISSING_WARNING_RATE == 0.50
+
+
+def test_표본_20건_중_60퍼센트가_결측이면_경고_1건(conn: sqlite3.Connection, config: Config):
+    _fill_browser(conn, 20, 12)
+
+    warnings = collect_calibration(conn, config).missing_warnings
+
+    assert len(warnings) == 1
+    assert "creator_fit 12/20(60%)" in warnings[0]
+    assert "임계값을 내리는 대신" in warnings[0]
+
+
+def test_표본이_19건이면_결측률이_높아도_경고하지_않는다(conn: sqlite3.Connection, config: Config):
+    _fill_browser(conn, 19, 19)
+
+    assert collect_calibration(conn, config).missing_warnings == []
+
+
+def test_결측률_경계_50퍼센트는_경고에_포함된다(conn: sqlite3.Connection, config: Config):
+    _fill_browser(conn, 20, 10)
+
+    assert len(collect_calibration(conn, config).missing_warnings) == 1
+
+
+def test_결측률이_50퍼센트_미만이면_경고하지_않는다(conn: sqlite3.Connection, config: Config):
+    _fill_browser(conn, 20, 9)
+
+    assert collect_calibration(conn, config).missing_warnings == []
+
+
+def test_import_후보는_followers가_없어도_경고하지_않는다(conn: sqlite3.Connection, config: Config):
+    """Import 후보는 애초에 followers가 없다 — 구조적 정상이지 이상 신호가 아니다."""
+    for index in range(50):
+        _insert(
+            conn, f"imp{index:03d}", score=80.0, followers=0, posted_at="2026-10-01",
+            source="import", missing_inputs=["creator_fit", "engagement"],
+        )
+
+    assert collect_calibration(conn, config).missing_warnings == []
+
+
+def test_추정_행은_경고_표본에_세지_않는다(conn: sqlite3.Connection, config: Config):
+    """레거시(추정) 행 30건이 전부 결측이어도 기록 행이 20건 미만이면 경고하지 않는다."""
+    for index in range(30):
+        _insert(conn, f"leg{index:03d}", score=68.0, followers=0, posted_at=None)
+    _fill_browser(conn, 10, 10)
+
+    assert collect_calibration(conn, config).missing_warnings == []
+
+
+def test_표본이_없으면_결측률은_none이다(conn: sqlite3.Connection, config: Config):
+    result = collect_calibration(conn, config)
+
+    assert set(result.missing_rates().values()) == {None}
+    assert result.missing_rates("instagram_browser_search") == {
+        "creator_fit": None, "activity": None, "engagement": None,
+    }
+    assert result.recorded_coverage is None
+
+
+def test_as_rows에_결측_관련_행_3개가_추가된다(conn: sqlite3.Connection, config: Config):
+    _insert(conn, "AAA111", score=68.0, followers=0, posted_at=None, missing_inputs=["creator_fit"])
+
+    rows = collect_calibration(conn, config).as_rows()
+
+    assert rows["축별 결측률"].startswith("creator_fit 100%")
+    assert rows["결측 기록 커버리지"] == "100% (1/1)"
+    assert rows["복원 불가 축"] == (
+        '복원 불가 축: content_similarity 0.00 / novelty 1.00 / language_region 0.40 은 '
+        '"정보 없음"과 구분되지 않습니다'
+    )
+
+
+def test_표본이_없으면_as_rows는_하이픈이다(conn: sqlite3.Connection, config: Config):
+    rows = collect_calibration(conn, config).as_rows()
+
+    assert rows["결측 기록 커버리지"] == "- (0/0)"
+    assert "100%" not in rows["축별 결측률"] and "0%" not in rows["축별 결측률"]
+
+
+def test_결측_기록은_ceiling_headroom_저점수_원인_값을_바꾸지_않는다(
+    conn: sqlite3.Connection, config: Config
+):
+    """같은 결측을 기록으로 읽든 추정으로 읽든 기존 진단 값은 같다."""
+    _insert(conn, "AAA111", score=68.0, followers=0, posted_at=None)  # 레거시
+    legacy = collect_calibration(conn, config)
+    conn.execute("DELETE FROM media_analysis")
+    conn.execute("DELETE FROM candidate_media")
+    conn.execute("DELETE FROM creators")
+    _insert(
+        conn, "AAA111", score=68.0, followers=0, posted_at=None,
+        missing_inputs=["creator_fit", "activity", "engagement"],
+    )
+    recorded = collect_calibration(conn, config)
+
+    for result in (legacy, recorded):
+        item = result.candidates[0]
+        assert item.ceiling == 75.0
+        assert item.headroom == 25.0
+        assert item.potential_max == 93.0
+        assert result.low_score_reasons() == {REASON_METADATA_MISSING: 1}

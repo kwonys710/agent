@@ -396,6 +396,7 @@ def _discovery_health(conn: sqlite3.Connection, config: Config) -> str:
     """
     health = queries.discovery_health(conn)
     engagement = queries.engagement_overview(conn, config)
+    missing = queries.score_missing(conn, config)
     novelty = health["novelty"]
     like = engagement["like"]
     comment = engagement["comment"]
@@ -436,6 +437,10 @@ def _discovery_health(conn: sqlite3.Connection, config: Config) -> str:
         ("댓글 Dry Run", comment["dry_run"]),
         ("댓글 게시 확인", comment["confirmed"]),
         ("댓글 확인 불가", comment["unknown"]),
+        ("creator_fit 결측", missing["creator_fit"]),
+        ("activity 결측", missing["activity"]),
+        ("engagement 결측", missing["engagement"]),
+        ("결측기록 커버리지", missing["coverage"]),
     ]
 
     def tiles(cells: Sequence[tuple[str, Any]]) -> str:

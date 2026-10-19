@@ -41,7 +41,7 @@ def activity_score(posted_at: Any, *, half_life_days: float = 14.0) -> float:
     """최신성 점수. 정보가 없으면 중립값 0.5."""
     parsed = _parse_datetime(posted_at)
     if parsed is None:
-        return 0.5
+        return 0.5  # 중립값. 결측 판정의 단일 판정기는 missing_inputs_for_row
     age_days = (datetime.now(timezone.utc) - parsed).total_seconds() / 86400
     if age_days < 0:
         return 1.0
@@ -51,9 +51,27 @@ def activity_score(posted_at: Any, *, half_life_days: float = 14.0) -> float:
 def engagement_score(likes: int, comments: int, followers: int) -> float:
     """팔로워 대비 반응률. 5% 이상이면 만점으로 본다."""
     if followers <= 0:
-        return 0.5
+        return 0.5  # 중립값. 결측 판정의 단일 판정기는 missing_inputs_for_row
     rate = (max(likes, 0) + max(comments, 0) * 3) / followers
     return round(min(1.0, rate / 0.05), 4)
+
+
+def missing_inputs_for_row(row: Mapping[str, Any]) -> tuple[str, ...]:
+    """입력이 없어서 **중립값 0.5가 된** 축을 찾는다(결측 판정의 단일 판정기).
+
+    다루는 축은 중립값이 0.5인 creator_fit / activity / engagement 뿐이다.
+    비공개 계정의 creator_fit은 0.0(중립값이 아님)이므로 결측으로 치지 않는다.
+    posted_at은 값이 있어도 파싱에 실패하면 결측이다(activity_score가 중립값을 쓰는 조건과 같다).
+    """
+    followers = int(row.get("followers") or 0)
+    missing: list[str] = []
+    if followers <= 0 and not bool(row.get("is_private")):
+        missing.append("creator_fit")
+    if _parse_datetime(row.get("posted_at")) is None:
+        missing.append("activity")
+    if followers <= 0:
+        missing.append("engagement")
+    return tuple(missing)
 
 
 def language_score(analysis_language: str, target_languages: Sequence[str]) -> float:
@@ -173,6 +191,7 @@ class TargetScorer:
             total=score,
             notes=notes,
             profile_version=self.profile_version,
+            missing_inputs=list(missing_inputs_for_row(media_row)),
         )
 
     def _topic_factor(self, topics: Sequence[str]) -> float:

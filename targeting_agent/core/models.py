@@ -147,6 +147,8 @@ class ScoreBreakdown:
     notes: list[str] = field(default_factory=list)
     # 어떤 Target Profile 버전으로 평가했는지(Phase 17)
     profile_version: str = ""
+    # 입력이 없어서 중립값이 된 축(P2-3). notes와 달리 정책 판정에 쓰지 않는 관측 전용 필드다.
+    missing_inputs: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +157,7 @@ class ScoreBreakdown:
             "total": self.total,
             "notes": self.notes,
             "profile_version": self.profile_version,
+            "missing_inputs": self.missing_inputs,
         }
 
 

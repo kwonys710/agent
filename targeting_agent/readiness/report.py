@@ -161,6 +161,7 @@ def _classify(
             f"후보 {len(calibration.comment_unreachable)}/{calibration.total}건은 정보 부족으로 "
             f"COMMENT 임계값({calibration.comment_threshold:.0f})에 도달할 수 없습니다."
         )
+    report.risks.extend(calibration.missing_warnings)
     # Browser Discovery가 Action으로 이어지지 않는 상태는 projection이
     # 건수까지 넣어 더 구체적으로 알려 준다 — 여기서 또 적지 않는다.
     if projection.current and projection.current.projected_total == 0:
