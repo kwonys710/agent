@@ -1,0 +1,29 @@
+# 실행 산출물(저장소에 올리지 않는다)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/logs/
+data/exports/
+data/cache/
+.env
+__pycache__/
+*.pyc
+
+# Inbox 입력 파일(실제 데이터)
+data/inbox/*.csv
+data/inbox/*_report.md
+data/inbox/processed/
+data/inbox/failed/
+
+# Phase 18A: 브라우저 로그인 세션 / 디버그 스크린샷 (절대 커밋하지 않는다)
+data/browser_profile/
+data/browser_debug/
+
+# 실행 중 생성되는 Lock / 요약 보고서 (실행 산출물이지 소스가 아니다)
+data/.autopilot.lock
+data/.browser_discovery.lock
+data/.scheduler.lock
+data/reports/
+# Live Canary 진행 상태(실행 산출물 — 이 파일이 실제 한도의 마지막 방어선이다)
+data/live_canary_state.json
+data/.canary_resume.lock
