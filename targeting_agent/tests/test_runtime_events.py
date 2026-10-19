@@ -465,8 +465,12 @@ def _call_name(node: ast.Call):
 def test_SchedulerLock을_쓰는_모든_모듈이_차단_기록도_호출한다():
     """교훈 1: 한 호출부만 고치면 나머지에 같은 결함이 남는다. 미적용 집합을 정확히 고정한다.
 
-    canary/resume.py 는 이번 Task 범위 밖(다른 Task 가 작업 중)이다. 그 파일에 차단 기록이
-    들어가면 이 단정이 깨지고, 그때 이 집합에서 빼는 것이 후속 처리의 완료 표시다.
+    canary/resume.py 는 `.canary_resume.lock` 을 쓰지만 차단 기록을 호출하지 않는다.
+    CI-002 에서 그 파일을 고쳤는데도 기록을 넣지 않은 것은 두 Task 가 동시에 작업해
+    파일 교집합을 피했기 때문이고, 의도된 미적용으로 여기 고정해 둔 것이다.
+    따라서 **운영자가 보는 Runtime 차단·미종료는 4개 런타임뿐이다** — Canary Resume 의
+    lock 경쟁은 관측되지 않는다. 그 파일에 차단 기록이 들어가면 이 단정이 깨지고,
+    그때 이 집합에서 빼는 것이 후속 처리의 완료 표시다.
     """
     root = Path(__file__).resolve().parent.parent
     users: set[str] = set()
