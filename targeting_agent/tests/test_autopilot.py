@@ -210,17 +210,20 @@ def test_action_차단이_감지되면_실행을_멈춘다(config: Config, conn:
 
 
 def test_lock이_잡혀_있으면_종료한다(config: Config, conn: sqlite3.Connection, tmp_path):
+    from targeting_agent.scheduler.lock import SchedulerLock
+
     lock_path = tmp_path / ".autopilot.lock"
-    lock_path.write_text(
-        '{"pid": 1, "created_at": "%s"}'
-        % datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        encoding="utf-8",
-    )
+    # 손으로 쓴 파일이 아니라 실제 OS 락을 쥔 선행 소유자(P1-1)
+    holder = SchedulerLock(path=lock_path, stale_minutes=60, label="Autopilot")
+    assert holder.acquire() is True
     cfg = autopilot_config(
         config, autopilot=True, lock={"enabled": True, "path": str(lock_path), "stale_minutes": 60}
     )
 
-    result = run_autopilot(cfg, conn, browser=discovery_browser(), action_page=FakeActionPage())
+    try:
+        result = run_autopilot(cfg, conn, browser=discovery_browser(), action_page=FakeActionPage())
+    finally:
+        holder.release()
 
     assert result.status == STATUS_LOCKED
     assert result.analyzed == 0

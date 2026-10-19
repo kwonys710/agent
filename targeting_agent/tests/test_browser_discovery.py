@@ -371,16 +371,17 @@ def test_비활성화면_아무것도_하지_않는다(config: Config, tmp_path:
 
 
 def test_lock이_잡혀_있으면_종료한다(discovery_config: Config, conn: sqlite3.Connection, tmp_path: Path):
+    from targeting_agent.scheduler.lock import SchedulerLock
+
     lock_path = tmp_path / "data" / ".browser_discovery.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    from datetime import datetime, timezone
+    # 손으로 쓴 파일이 아니라 실제 OS 락을 쥔 선행 소유자(P1-1)
+    holder = SchedulerLock(path=lock_path, stale_minutes=30, label="Browser Discovery")
+    assert holder.acquire() is True
 
-    lock_path.write_text(
-        '{"pid": 1, "created_at": "%s"}' % datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        encoding="utf-8",
-    )
-
-    result = run_browser_discovery(discovery_config, conn, browser=browser_with(["AAA111"]))
+    try:
+        result = run_browser_discovery(discovery_config, conn, browser=browser_with(["AAA111"]))
+    finally:
+        holder.release()
 
     assert result.status == STATUS_LOCKED
     assert result.added == 0

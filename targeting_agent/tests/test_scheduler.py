@@ -359,7 +359,8 @@ def test_lock_prevents_concurrent_run(conn, config, tmp_path) -> None:
     lock.release()
 
 
-def test_stale_lock_is_taken_over(conn, config, tmp_path) -> None:
+def test_락_소유자가_없으면_TTL과_무관하게_회수한다(conn, config, tmp_path) -> None:
+    """락을 쥔 프로세스가 없으면 기록이 오래됐든 말든 인수한다(P1-1: 판정은 커널이 한다)."""
     cfg = _config(config, tmp_path)
     path = Path(cfg.get("scheduler.lock.path"))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,10 +371,33 @@ def test_stale_lock_is_taken_over(conn, config, tmp_path) -> None:
     assert result.status == STATUS_OK
 
 
+def test_락_소유자가_없으면_신선한_기록이어도_회수한다(conn, config, tmp_path) -> None:
+    """P1-1의 표현: 방금 시각의 기록이어도 소유자가 없으면 즉시 실행한다(예전에는 60분 차단)."""
+    cfg = _config(config, tmp_path)
+    path = Path(cfg.get("scheduler.lock.path"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    path.write_text(f'{{"pid": 1, "created_at": "{fresh}"}}', encoding="utf-8")
+
+    result, _ = _run(conn, cfg)
+    assert result.status == STATUS_OK
+
+
+def _assert_released_not_deleted(path: Path) -> None:
+    """해제 후에도 파일은 남고(unlink 금지: inode 동일성) released_at 이 있으며 다시 잡을 수 있다."""
+    import json
+
+    assert path.exists()
+    assert "released_at" in json.loads(path.read_text(encoding="utf-8"))
+    again = SchedulerLock(path=path, stale_minutes=60)
+    assert again.acquire() is True
+    again.release()
+
+
 def test_lock_released_after_run(conn, config, tmp_path) -> None:
     cfg = _config(config, tmp_path)
     _run(conn, cfg)
-    assert not Path(cfg.get("scheduler.lock.path")).exists()
+    _assert_released_not_deleted(Path(cfg.get("scheduler.lock.path")))
 
 
 def test_lock_released_after_failure(conn, config, tmp_path) -> None:
@@ -386,10 +410,10 @@ def test_lock_released_after_failure(conn, config, tmp_path) -> None:
     result = run_scheduled(cfg, conn, processor_factory=failing)
 
     assert result.status == "FAILED" and result.exit_code == 1
-    assert not Path(cfg.get("scheduler.lock.path")).exists()   # 비정상 종료에도 정리
+    _assert_released_not_deleted(Path(cfg.get("scheduler.lock.path")))   # 비정상 종료에도 해제
 
 
-def test_corrupt_lock_treated_as_stale(conn, config, tmp_path) -> None:
+def test_깨진_lock_파일이라도_소유자가_없으면_차단하지_않는다(conn, config, tmp_path) -> None:
     cfg = _config(config, tmp_path)
     path = Path(cfg.get("scheduler.lock.path"))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -443,32 +467,24 @@ def test_lock_로그에_어느_실행인지_나온다(tmp_path, caplog):
     """같은 lock 클래스를 여러 실행이 쓰므로, 문구로 소유자가 분간돼야 한다.
 
     실기에서 Discovery가 막혔는데 '다른 Scheduled Run이 진행 중'이라고 찍혀 혼동됐다.
+    P1-1: 손으로 쓴 파일이 아니라 실제로 락을 쥔 프로세스(자식)를 소유자로 쓴다.
     """
-    import json
     import logging
-    import os
-    from datetime import datetime, timezone
-
-    from targeting_agent.scheduler.lock import SchedulerLock
 
     path = tmp_path / ".browser_discovery.lock"
-    path.write_text(
-        json.dumps(
-            {"pid": 12428, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-        ),
-        encoding="utf-8",
-    )
     lock = SchedulerLock(path=path, stale_minutes=30, label="Browser Discovery")
 
-    with caplog.at_level(logging.INFO):
-        acquired = lock.acquire()
+    with _holder(path, label="Browser Discovery", stale_minutes=30) as child:
+        with caplog.at_level(logging.INFO):
+            acquired = lock.acquire()
 
     assert acquired is False
     message = caplog.text
     assert "Browser Discovery" in message
     assert "Scheduled Run" not in message
-    assert "12428" in message
-    assert str(path) in message  # 어느 파일을 지워야 하는지 알려 준다
+    assert str(child.pid) in message                 # 락을 쥔 프로세스의 pid
+    assert str(path) in message                      # 어느 lock 파일인지
+    assert "지우지 마십시오" in message               # 복구 안내가 역전됐다(삭제는 위험하다)
 
 
 def test_모든_runtime이_lock_소유자_이름을_넘긴다():
@@ -505,3 +521,458 @@ def test_모든_runtime이_lock_소유자_이름을_넘긴다():
             )
 
     assert len(사용처) >= 5  # 사용처를 지나치게 좁게 찾고 있지 않은지 자체 점검
+
+
+# --- P1-1. OS 파일락 -----------------------------------------------------------
+import contextlib
+import json
+import logging
+import os
+import subprocess
+import sys
+import time
+
+from targeting_agent.scheduler import lock as lockmod
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_HOLDER_SCRIPT = """
+import os, sys, time
+from pathlib import Path
+from targeting_agent.scheduler.lock import SchedulerLock
+lock = SchedulerLock(path=Path(sys.argv[1]), stale_minutes=int(sys.argv[2]), label=sys.argv[3])
+ok = lock.acquire()
+print("READY %d" % os.getpid() if ok else "DENIED", flush=True)
+time.sleep(120)
+"""
+
+
+@contextlib.contextmanager
+def _holder(path: Path, label: str = "Holder", stale_minutes: int = 60):
+    """별도 프로세스가 실제로 락을 잡고 대기한다. 빠져나올 때 반드시 종료한다."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_SCRIPT, str(path), str(stale_minutes), label],
+        cwd=str(_REPO_ROOT),
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        line = proc.stdout.readline().strip()
+        assert line == f"READY {proc.pid}", f"자식이 락을 잡지 못했다: {line!r}"
+        yield proc
+    finally:
+        proc.kill()
+        proc.wait()
+        proc.stdout.close()
+
+
+def _payload(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_T1_다른_프로세스가_락을_쥐면_차단되고_죽으면_TTL_없이_즉시_인수한다(tmp_path, caplog):
+    """P1-1 수용 기준. 실제 두 프로세스, 실제 커널 락."""
+    path = tmp_path / ".scheduler.lock"
+    lock = SchedulerLock(path=path, stale_minutes=60, label="Holder")
+
+    with _holder(path) as child:
+        assert child.pid != os.getpid()                      # 정말 다른 프로세스다
+        created_at = _payload(path)["created_at"]
+        with caplog.at_level(logging.INFO):
+            assert lock.acquire() is False
+        text = caplog.text
+        assert "Holder" in text and str(child.pid) in text and str(path) in text
+        assert created_at in text and "60" in text           # 생성 시각·TTL
+        assert "프로세스를 종료하면 즉시 해제됩니다" in text
+        assert "지우지 마십시오" in text
+        assert _payload(path)["pid"] == child.pid            # 차단이 소유자 기록을 건드리지 않았다
+
+        child.kill()                                         # SIGKILL: 정리 코드가 돌지 않는다
+        child.wait()
+        caplog.clear()
+        assert lock.acquire() is True                        # TTL(60분) 경과 없이 즉시
+    assert _payload(path)["pid"] == os.getpid()
+    lock.release()
+
+
+def test_T2_같은_프로세스의_두_번째_인스턴스도_거부된다(tmp_path):
+    path = tmp_path / ".scheduler.lock"
+    first = SchedulerLock(path=path)
+    second = SchedulerLock(path=path)
+    assert first.acquire() is True
+    assert second.acquire() is False
+    first.release()
+    assert second.acquire() is True
+    second.release()
+
+
+def test_T3_release는_파일을_지우지_않고_released_at을_남긴다(tmp_path, caplog):
+    path = tmp_path / ".scheduler.lock"
+    lock = SchedulerLock(path=path)
+    assert lock.acquire() is True
+    lock.release()
+
+    assert path.exists()                                     # unlink 금지(inode 동일성)
+    assert "released_at" in _payload(path)
+    with caplog.at_level(logging.INFO):
+        assert SchedulerLock(path=path).acquire() is True
+    assert "소유자 없음" not in caplog.text                    # 정상 해제는 이상 신호가 아니다
+
+
+def test_T3b_release는_멱등하고_acquire_실패_뒤에도_안전하다(tmp_path):
+    path = tmp_path / ".scheduler.lock"
+    holder = SchedulerLock(path=path)
+    assert holder.acquire() is True
+    loser = SchedulerLock(path=path)
+    assert loser.acquire() is False
+    loser.release()                                          # 실패한 인스턴스의 release는 no-op
+    assert _payload(path)["pid"] == os.getpid() and "released_at" not in _payload(path)
+
+    holder.release()
+    first = _payload(path)
+    holder.release()                                         # 2회 호출도 no-op
+    assert _payload(path) == first
+
+
+def test_T3c_비활성이면_파일을_열지_않는다(tmp_path):
+    path = tmp_path / "sub" / ".scheduler.lock"
+    lock = SchedulerLock(path=path, enabled=False)
+    assert lock.acquire() is True
+    lock.release()
+    assert not path.exists() and lock._fd is None
+
+
+def test_T4_SIGKILL된_소유자의_파일에는_released_at이_없고_인수_시_소유자_없음이_로그에_남는다(tmp_path, caplog):
+    path = tmp_path / ".scheduler.lock"
+    with _holder(path) as child:
+        child.kill()
+        child.wait()
+    assert "released_at" not in _payload(path)
+    with caplog.at_level(logging.INFO):
+        lock = SchedulerLock(path=path)
+        assert lock.acquire() is True
+    assert "소유자 없음" in caplog.text and str(child.pid) in caplog.text
+    lock.release()
+
+
+def test_T5_락_없는_신선한_기록은_TTL과_무관하게_인수하고_신호를_남긴다(tmp_path, caplog):
+    path = tmp_path / ".scheduler.lock"
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    path.write_text(f'{{"pid": 1, "created_at": "{fresh}"}}', encoding="utf-8")
+    with caplog.at_level(logging.INFO):
+        lock = SchedulerLock(path=path, stale_minutes=60)
+        assert lock.acquire() is True
+    assert "초 전인데 커널 락이 비어 있다" in caplog.text        # 락 미지원 FS 탐지기
+    assert _payload(path)["pid"] == os.getpid()
+    lock.release()
+
+
+def test_T6_서로_다른_두_lock_파일은_한_프로세스가_동시에_쥘_수_있다(tmp_path):
+    outer = SchedulerLock(path=tmp_path / ".autopilot.lock", label="Autopilot")
+    inner = SchedulerLock(path=tmp_path / ".browser_discovery.lock", label="Browser Discovery")
+    assert outer.acquire() is True
+    assert inner.acquire() is True                           # autopilot이 discovery를 내부 호출
+    inner.release()
+    outer.release()
+
+
+def test_T7_fd는_상속되지_않아_자식_프로세스가_락을_물지_않는다(tmp_path):
+    path = tmp_path / ".scheduler.lock"
+    lock = SchedulerLock(path=path)
+    assert lock.acquire() is True
+    assert os.get_inheritable(lock._fd) is False
+
+    # POSIX에서는 close_fds=False 로 띄워 '상속 가능 여부'만이 결과를 가르게 한다.
+    extra = {"close_fds": False} if os.name == "posix" else {}
+    orphan = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], **extra
+    )
+    try:
+        lock.release()
+        again = SchedulerLock(path=path)
+        assert again.acquire() is True                       # 고아 자식이 락을 물고 있지 않다
+        again.release()
+    finally:
+        orphan.kill()
+        orphan.wait()
+
+
+def test_T8_락을_쥔_중에도_다른_프로세스가_offset_1부터_payload를_읽는다(tmp_path):
+    path = tmp_path / ".scheduler.lock"
+    with _holder(path) as child:
+        with open(path, "rb") as fh:
+            fh.seek(1)
+            assert json.loads(fh.read().decode("utf-8"))["pid"] == child.pid
+        assert SchedulerLock(path=path)._read()["pid"] == child.pid
+
+
+def test_T12_payload는_전체_읽기와_offset_1_읽기_모두_유효한_JSON이다(tmp_path):
+    path = tmp_path / ".scheduler.lock"
+    lock = SchedulerLock(path=path, label="한글 label")
+    assert lock.acquire() is True
+    raw = path.read_bytes()
+    assert raw[:1] == b" "                                   # Windows 락 바이트(자리바이트)
+    full = json.loads(raw.decode("utf-8"))
+    tail = json.loads(raw[1:].decode("utf-8"))
+    assert full == tail and full["pid"] == os.getpid() and full["label"] == "한글 label"
+    lock.release()
+
+
+def test_T12b_락_바이트를_읽을_수_없어도_offset_1로_읽는다(tmp_path, monkeypatch):
+    """Windows 바이트영역 락은 mandatory라 offset 0을 포함한 읽기가 실패한다."""
+    path = tmp_path / ".scheduler.lock"
+    holder = SchedulerLock(path=path)
+    assert holder.acquire() is True
+    real = lockmod._read_bytes
+
+    def mandatory(p, offset):
+        if offset == 0:
+            raise PermissionError("lock violation")
+        return real(p, offset)
+
+    monkeypatch.setattr(lockmod, "_read_bytes", mandatory)
+    assert SchedulerLock(path=path)._read()["pid"] == os.getpid()
+    holder.release()
+
+
+def test_예전_형식_lock_파일도_pid를_읽는다(tmp_path):
+    """자리바이트 없는 예전 `{...}` 파일은 offset 1에서 첫 글자가 잘리므로 전체를 다시 읽는다."""
+    path = tmp_path / ".scheduler.lock"
+    path.write_text('{"pid": 77, "created_at": "2026-01-01T00:00:00+00:00"}', encoding="utf-8")
+    assert SchedulerLock(path=path)._read()["pid"] == 77
+
+
+# --- 주입 테스트: Windows 분기 / 폴백 / 읽기 실패 / I/O 실패 -------------------------
+class FakeMsvcrt:
+    LK_NBLCK = 2
+    LK_UNLCK = 0
+
+    def __init__(self, fail_errno: int | None = None) -> None:
+        self.fail_errno = fail_errno
+        self.calls: list[tuple[int, int, int]] = []   # (mode, nbytes, 호출 시점의 파일 위치)
+
+    def locking(self, fd: int, mode: int, nbytes: int) -> None:
+        self.calls.append((mode, nbytes, os.lseek(fd, 0, os.SEEK_CUR)))
+        if mode == self.LK_NBLCK and self.fail_errno is not None:
+            raise OSError(self.fail_errno, "fake msvcrt")
+
+
+def _use_windows_locker(monkeypatch, fake: FakeMsvcrt) -> None:
+    monkeypatch.setattr(
+        lockmod, "_LOCKER", (lockmod._win_lock, lockmod._win_unlock, fake)
+    )
+
+
+def _write_record(path: Path, age: timedelta, **extra) -> str:
+    created = (datetime.now(timezone.utc) - age).isoformat(timespec="seconds")
+    text = json.dumps({"pid": 4242, "created_at": created, **extra})
+    path.write_text(" " + text, encoding="utf-8")
+    return text
+
+
+def test_T9_Windows_분기_정상_획득은_바이트0을_1바이트_NBLCK으로_잠그고_release에서_푼다(tmp_path, monkeypatch):
+    fake = FakeMsvcrt()
+    _use_windows_locker(monkeypatch, fake)
+    lock = SchedulerLock(path=tmp_path / ".scheduler.lock")
+    assert lock.acquire() is True
+    # 자리바이트를 쓴 직후라 위치가 1이다 → lseek(0) 이 선행돼야 바이트 0이 잠긴다.
+    assert fake.calls == [(FakeMsvcrt.LK_NBLCK, 1, 0)]
+    lock.release()
+    assert fake.calls[-1] == (FakeMsvcrt.LK_UNLCK, 1, 0)
+
+
+def test_T9_Windows_분기_EACCES는_차단이고_TTL이_지나도_회수하지_않는다(tmp_path, monkeypatch, caplog):
+    import errno
+
+    path = tmp_path / ".scheduler.lock"
+    original = _write_record(path, timedelta(hours=5))       # TTL(60분)을 한참 넘긴 기록
+    _use_windows_locker(monkeypatch, FakeMsvcrt(fail_errno=errno.EACCES))
+    with caplog.at_level(logging.INFO):
+        assert SchedulerLock(path=path, stale_minutes=60).acquire() is False
+    assert path.read_text(encoding="utf-8") == " " + original   # 회수·덮어쓰기 없음
+    assert "회수하지 않습니다" in caplog.text and "4242" in caplog.text
+
+
+def test_T9_Windows_분기_EINVAL은_UNKNOWN이라_TTL_폴백한다(tmp_path, monkeypatch, caplog):
+    import errno
+
+    path = tmp_path / ".scheduler.lock"
+    _write_record(path, timedelta(hours=5))
+    _use_windows_locker(monkeypatch, FakeMsvcrt(fail_errno=errno.EINVAL))
+    with caplog.at_level(logging.INFO):
+        lock = SchedulerLock(path=path, stale_minutes=60)
+        assert lock.acquire() is True                         # 오래된 기록 → 오늘처럼 회수
+    assert "mode=TTL_FALLBACK" in caplog.text and "lock 기반 판정 비활성" in caplog.text
+    assert lock._mode == lockmod.MODE_TTL_FALLBACK
+    lock.release()
+    assert "released_at" in _payload(path)
+
+
+def test_T9_방금_만든_파일에서_충돌이_보고되면_UNKNOWN으로_떨어뜨린다(tmp_path, monkeypatch, caplog):
+    """방금 만든 파일을 정당하게 소유한 프로세스는 없다 → 락 영역 오판. 조용한 LOCKED를 막는다."""
+    import errno
+
+    _use_windows_locker(monkeypatch, FakeMsvcrt(fail_errno=errno.EACCES))
+    path = tmp_path / ".scheduler.lock"
+    assert not path.exists()
+    with caplog.at_level(logging.INFO):
+        lock = SchedulerLock(path=path)
+        assert lock.acquire() is True
+    assert "mode=TTL_FALLBACK" in caplog.text and "락 영역 오판" in caplog.text
+    lock.release()
+
+
+def test_모드_로그_한_줄이_KERNEL을_알린다(tmp_path, caplog):
+    with caplog.at_level(logging.INFO):
+        lock = SchedulerLock(path=tmp_path / ".scheduler.lock")
+        assert lock.acquire() is True
+    assert "mode=KERNEL" in caplog.text
+    assert lock._mode == lockmod.MODE_KERNEL
+    lock.release()
+
+
+def test_T10_락_API가_없으면_오늘의_TTL_의미가_그대로다(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(lockmod, "_LOCKER", None)
+    old = tmp_path / "old.lock"
+    _write_record(old, timedelta(hours=3))
+    fresh = tmp_path / "fresh.lock"
+    original = _write_record(fresh, timedelta(minutes=1))
+    broken = tmp_path / "broken.lock"
+    broken.write_text("깨진 내용", encoding="utf-8")
+
+    with caplog.at_level(logging.INFO):
+        a = SchedulerLock(path=old, stale_minutes=60)
+        assert a.acquire() is True                            # 오래된 기록은 회수
+        c = SchedulerLock(path=broken, stale_minutes=60)
+        assert c.acquire() is True                            # 깨진 기록(JSONDecodeError)도 stale
+        assert SchedulerLock(path=fresh, stale_minutes=60).acquire() is False   # 신선한 기록은 차단
+    assert fresh.read_text(encoding="utf-8") == " " + original
+    assert "mode=TTL_FALLBACK" in caplog.text
+    a.release()
+    c.release()
+    # 폴백에서도 정상 해제된 기록은 곧바로 인수된다
+    again = SchedulerLock(path=old, stale_minutes=60)
+    assert again.acquire() is True
+    again.release()
+
+
+def test_T11_락을_쥔_채_payload를_읽을_수_없어도_차단하고_회수하지_않는다(tmp_path, monkeypatch, caplog):
+    path = tmp_path / ".scheduler.lock"
+    holder = SchedulerLock(path=path)
+    assert holder.acquire() is True
+    before = path.read_bytes()
+
+    def broken(p, offset):
+        raise PermissionError("sharing violation")
+
+    monkeypatch.setattr(lockmod, "_read_bytes", broken)
+    with caplog.at_level(logging.INFO):
+        assert SchedulerLock(path=path, label="Probe").acquire() is False
+    assert path.read_bytes() == before
+    assert "소유자 기록을 읽을 수 없습니다(락 보유 중)" in caplog.text
+    assert "Probe" in caplog.text and str(path) in caplog.text and "지우지 마십시오" in caplog.text
+    holder.release()
+
+
+def test_락_경로는_TTL이_지나도_회수하지_않고_로그_레벨만_올린다(tmp_path, caplog):
+    path = tmp_path / ".scheduler.lock"
+    holder = SchedulerLock(path=path)
+    assert holder.acquire() is True
+    later = datetime.now(timezone.utc) + timedelta(hours=3)
+    with caplog.at_level(logging.INFO):
+        assert SchedulerLock(path=path, stale_minutes=60).acquire(later) is False
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("비정상적으로 긴 실행" in r.getMessage() and "회수하지 않습니다" in r.getMessage() for r in warned)
+    assert _payload(path)["pid"] == os.getpid()
+    holder.release()
+
+
+def test_T13_lock_파일을_열지_못하면_False가_아니라_LockIOError다(tmp_path, monkeypatch, caplog, conn, config):
+    cfg = _config(config, tmp_path)
+    path = Path(cfg.get("scheduler.lock.path"))
+    real_open = os.open
+
+    def deny(p, *args, **kwargs):
+        if str(p) == str(path):
+            raise PermissionError(13, "denied")
+        return real_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(lockmod.os, "open", deny)
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(lockmod.LockIOError):
+            SchedulerLock(path=path).acquire()
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+        # 호출부도 삼키지 않는다 — LOCKED/exit 0 으로 둔갑하면 Task Scheduler가 성공으로 본다.
+        with pytest.raises(lockmod.LockIOError):
+            _run(conn, cfg)
+
+
+def test_T14_폴백_경로에서_기록을_읽을_수_없으면_회수하지_않고_차단한다(tmp_path, monkeypatch, caplog):
+    path = tmp_path / ".scheduler.lock"
+    original = _write_record(path, timedelta(hours=5))        # 읽혔다면 stale로 회수됐을 기록
+    monkeypatch.setattr(lockmod, "_LOCKER", None)
+
+    def broken(p, offset):
+        raise PermissionError("OneDrive placeholder")
+
+    monkeypatch.setattr(lockmod, "_read_bytes", broken)
+    with caplog.at_level(logging.INFO):
+        assert SchedulerLock(path=path, stale_minutes=60).acquire() is False
+    monkeypatch.undo()
+    assert path.read_text(encoding="utf-8") == " " + original
+    assert "소유자 기록을 읽을 수 없습니다" in caplog.text
+
+
+def test_5개_Runtime_모두_실제_락을_쥔_상태에서는_각자의_LOCKED로_끝난다(conn, config, tmp_path):
+    """교차 회귀: 락 구현이 바뀌어도 Runtime별 LOCKED 상태와 exit 0 계약이 같다."""
+    from targeting_agent.autopilot.runner import STATUS_LOCKED as AUTOPILOT_LOCKED, run_autopilot
+    from targeting_agent.canary.comment_runner import OUTCOME_LOCKED, run_comment_canary
+    from targeting_agent.canary.resume import STEP_NOOP, resume_canary
+    from targeting_agent.discovery.browser_runner import (
+        STATUS_LOCKED as DISCOVERY_LOCKED,
+        run_browser_discovery,
+    )
+
+    raw = {
+        **config.raw,
+        "scheduler": {**config.raw.get("scheduler", {}), "enabled": True,
+                      "lock": {"enabled": True, "path": "data/.scheduler.lock", "stale_minutes": 60}},
+        "autopilot": {**config.raw.get("autopilot", {}),
+                      "lock": {"enabled": True, "path": "data/.autopilot.lock", "stale_minutes": 60}},
+        "browser_discovery": {**config.raw.get("browser_discovery", {}), "enabled": True,
+                              "lock": {"enabled": True, "path": "data/.browser_discovery.lock",
+                                       "stale_minutes": 30}},
+        "canary": {**config.raw.get("canary", {}),
+                   "comment": {**config.raw.get("canary", {}).get("comment", {}),
+                               "lock": {"enabled": True, "path": "data/.canary_comment.lock",
+                                        "stale_minutes": 30}}},
+    }
+    cfg = Config(raw=raw, path=config.path, base_dir=tmp_path)
+
+    names = {
+        "scheduler": ("data/.scheduler.lock", lambda: run_scheduled(cfg, conn)),
+        "autopilot": ("data/.autopilot.lock", lambda: run_autopilot(cfg, conn)),
+        "discovery": ("data/.browser_discovery.lock", lambda: run_browser_discovery(cfg, conn)),
+        "comment": ("data/.canary_comment.lock", lambda: run_comment_canary(cfg, conn=conn, live=False)),
+        "resume": ("data/.canary_resume.lock", lambda: resume_canary(cfg, conn=conn)),
+    }
+    holders = []
+    try:
+        for rel, _ in names.values():
+            held = SchedulerLock(path=tmp_path / rel, label="선행 소유자")
+            assert held.acquire() is True
+            holders.append(held)
+
+        scheduled = names["scheduler"][1]()
+        assert scheduled.status == STATUS_LOCKED and scheduled.exit_code == 0
+        autopilot = names["autopilot"][1]()
+        assert autopilot.status == AUTOPILOT_LOCKED and autopilot.exit_code == 0
+        discovery = names["discovery"][1]()
+        assert discovery.status == DISCOVERY_LOCKED and discovery.exit_code == 0
+        comment = names["comment"][1]()
+        assert comment.outcome == OUTCOME_LOCKED and comment.exit_code == 0
+        resume = names["resume"][1]()
+        assert resume.step == STEP_NOOP and resume.exit_code == 0
+    finally:
+        for held in holders:
+            held.release()
