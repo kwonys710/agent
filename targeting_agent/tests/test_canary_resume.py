@@ -820,3 +820,36 @@ def test_discovery_상태_표시는_빈_사유나_빈_상태를_이상하게_찍
     )
     # 상태 없이 사유만 있어도 괄호만 찍히지 않는다.
     assert "()" not in ResumeResult(source_status="LOCKED").as_rows()["Discovery 상태"]
+
+
+def test_분기가_없는_새_status는_경고를_남기고_failed로_처리된다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch, caplog
+):
+    """_KNOWN_STATUSES 는 browser_runner 의 복사본이다 — drift 는 경고로 드러나야 한다."""
+    import logging
+
+    _spend_ai(conn, 5)
+    _install(monkeypatch, _discovery_result("RATE_LIMITED"))
+
+    with caplog.at_level(logging.WARNING):
+        result = resume_canary(conn=conn, config=resume_config, now=NOW)
+
+    assert "알 수 없는 Discovery 상태" in caplog.text
+    assert "RATE_LIMITED" in caplog.text
+    assert result.source_status == "FAILED"
+    assert result.step == STEP_BLOCKED
+    assert result.status == WAITING_NEXT_RUN
+
+
+def test_알려진_status는_알_수_없음_경고를_내지_않는다(
+    conn: sqlite3.Connection, resume_config: Config, monkeypatch, caplog
+):
+    import logging
+
+    _spend_ai(conn, 5)
+    _install(monkeypatch, _discovery_result("LOCKED"))
+
+    with caplog.at_level(logging.WARNING):
+        resume_canary(conn=conn, config=resume_config, now=NOW)
+
+    assert "알 수 없는 Discovery 상태" not in caplog.text

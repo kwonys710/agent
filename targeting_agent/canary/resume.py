@@ -24,7 +24,6 @@ from typing import Any, Optional
 from ..core.config import Config
 from ..core.database import get_connection, init_db, today_str
 from ..core.logger import get_logger
-from ..discovery import browser_runner as _browser_runner
 from ..discovery.browser_runner import (
     STATUS_DISABLED,
     STATUS_EMPTY,
@@ -104,12 +103,18 @@ class DiscoveryOutcome:
     analyzed: int = 0
 
 
-# Discovery가 정의한 status 전체. browser_runner에 새 STATUS_*가 생기면 자동으로 따라온다
-# (여기 복사본을 두면 새 상태가 조용히 "알 수 없음"으로 떨어진다).
+# browser_runner 의 STATUS_* 와 **중복**이다. 새 status 가 추가되면 여기와 아래 분기를 더해야 하며,
+# 그때까지는 "알 수 없는 Discovery 상태" 경고가 뜨고 FAILED 로 처리된다(경고가 drift 신호다).
 _KNOWN_STATUSES = frozenset(
-    value
-    for name, value in vars(_browser_runner).items()
-    if name.startswith("STATUS_") and isinstance(value, str)
+    {
+        STATUS_SUCCESS,
+        STATUS_EMPTY,
+        STATUS_PARTIAL,
+        STATUS_FAILED,
+        STATUS_SESSION_STOPPED,
+        STATUS_LOCKED,
+        STATUS_DISABLED,
+    }
 )
 
 # SESSION_STOPPED 의 stop_reason 별 설명. Discovery 원문 안내("다시 시도하세요")는
