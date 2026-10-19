@@ -95,11 +95,21 @@ LIVE 전환은 운영자 판단이며 `browser_executor.mode`와 `actions.execut
 
 ## Last Regression
 
-`python -m pytest targeting_agent/tests -q` → **917 passed** (2026-10-19, CI-001)
+`python -m pytest targeting_agent/tests -q` → **925 passed** (2026-10-19, CI-001)
 
-실제 Instagram / Claude CLI 호출 0, Task Scheduler 변경 0.
-CI-001 에서 86건이 늘었다(831 → 917). 커널 락은 실제로 두 프로세스를 띄워
-검증하고, Windows 분기는 주입으로 덮었다. 각 수정은 변이 검사로 실효성을 확인했다.
+CI-001 에서 94건이 늘었다(831 → 925). 기준선 831 은 `8a77ae5`(lock 사용처 전수
+검사 테스트 1건 추가) 시점이다. ledger 1번이 적은 830 은 그 앞 `04b40ef` 시점이며
+둘은 모순이 아니다. 커널 락은 실제로 두 프로세스를 띄워
+검증하고(SIGKILL 후 TTL 경과 없이 획득), Windows 분기는 주입으로 덮었다.
+각 수정은 변이 검사로 실효성을 확인했다.
+
+Verifier 가 독립 검증했다. `socket.connect`/`getaddrinfo`/`subprocess.Popen` 을
+후킹해 전체 회귀를 재실행한 결과 **네트워크 connect 0건 · DNS 조회 0건 ·
+`claude` 실행 0건** 이다. `Popen` 12건은 lock 테스트의 자식 프로세스와 기존
+Playwright 드라이버(대상은 127.0.0.1 fixture 서버)뿐이다.
+Task Scheduler·스크립트 변경 0(`scripts/*`, `*.bat`, `*.ps1` diff 비어 있음).
+남은 UNVERIFIED: Chromium 이 자기 프로세스에서 내는 소켓은 Python 후크로
+관측할 수 없다(코드상 대상은 127.0.0.1 뿐). Windows 락 동작은 Linux 에서 실행 불가.
 
 ## Next Recommended Task
 
@@ -114,6 +124,48 @@ CI-001 에서 86건이 늘었다(831 → 917). 커널 락은 실제로 두 프�
 4. 위 결과를 가지고 Analytics 읽기 전용 검토 (예시 C) → 개선 후보 Top 3.
 5. 관찰 결과가 없으면 신규 Phase를 열지 않는다. 운영 근거 우선.
    **Next Review: 운영 데이터 축적 후** (실행 로그 + 결측 커버리지).
+
+## Next Improvement Candidates (CI-001 종료 후 읽기 전용 재평가)
+
+판정 **BUG_FIX_REQUIRED**. 운영 지표는 INSUFFICIENT_DATA(컨테이너 DB 는 개발 fixture).
+코드 근거 기반이며 **이번 사이클에서 고치지 않았다**.
+
+1. **P1 — Canary Resume 이 Discovery 결과 상태를 버린다** (새로 발견, CI-001 이 만든 것 아님)
+   `canary/resume.py:189-190` 이 `run_browser_discovery` 결과에서 `added`/`analyzed` 만
+   가져오고 `status`/`stop_reason`/`message` 를 버린다. 그래서 LOCKED ·
+   SESSION_STOPPED(로그인 만료·Challenge) · FAILED 어느 경우든
+   `WAITING_ELIGIBLE` "임계값 이상인 실제 후보가 없다(최고점 …)" 로 기록된다.
+   **운영자가 세션·lock 문제를 점수 부족으로 오인하고, 그것이 임계값을 낮추라는
+   압력으로 이어진다**(교훈 6번과 같은 패턴). Challenge 가 활동 상태로 전파되지도
+   않아 다음 Resume 이 또 브라우저를 연다 — `observe()` 는 Autopilot 만 호출한다
+   (`autopilot/runner.py:258-260`). 쓰기 단계에서 페이지 단위 재검사가 있어
+   (`browser_page.py:158-190`) 즉시 위험은 아니고 방어 심도 문제다.
+   범위: `canary/resume.py` + `tests/test_canary_resume.py` (공유 파일 아님 → 병렬 가능).
+   운영자 결정 영역 아님.
+2. **P1 — LOCKED 와 멈춘 실행이 DB 에 아무 신호를 남기지 않는다** (M2)
+   LOCKED 는 `try` 앞에서 반환되고(`scheduler/runner.py:128-133` 등) 기록은 모두
+   실행 끝에 있어, **멈춘 소유자 자신도 행을 남기지 않는다.** "마지막 정상 실행 이후
+   경과" 나 "연속 LOCKED" 를 보는 질의가 없고 LOCKED 는 exit 0 이라 Task Scheduler 에도
+   정상으로 보인다. P1-1 이 TTL 자동 회수를 없앴으므로 **이 관측 수단이 그 대가다.**
+   주의: LOCKED 행을 그냥 추가하면 `learning/operations.py:154-155` 가 분모만 키워
+   실패율을 희석하고, `autopilot_runs.run_id` 는 NOT NULL 이다. 설계 선택이 필요하다
+   (행을 남기고 집계에서 제외 / 행 없이 readiness 에 경과 시간 노출).
+   범위: `scheduler/runner.py`, `autopilot/runner.py`, `canary/comment_runner.py`,
+   `readiness/*`, `learning/operations.py`, `discovery/browser_runner.py`(공유 → 순차).
+3. **P0 범주이나 증거 부족 — lock 5개에 브라우저 프로필 1개** (S3)
+   `--canary-resume` 은 `browser_discovery.enabled=false` 를 메모리에서 덮어쓰고
+   Discovery 를 연다(`resume.py:178-183`). 그 경로의 lock 은 COMMENT Canary 의 lock 과
+   서로 막지 않는다. Chromium 이 프로필을 자체 잠그면 두 번째 기동이 조용한 2중 조작이
+   아니라 **launch 실패**로 드러나므로 위험이 P1 로 내려가지만, **코드는 그 가정을
+   확인하지도 의존하지도 않는다.** 먼저 Playwright 프로필 잠금을 실측으로 확인한다.
+   통합 lock 은 운영 동작을 바꾸므로(Discovery 가 Canary 를 막는다)
+   **운영자 결정 영역 — 권고까지만.**
+
+보류(증거·영향 부족): 손상된 `score_breakdown` JSON 이 readiness 에서 예외(P3,
+쓰는 쪽이 항상 `json.dumps` 라 수동 손상 외엔 발생하지 않음) · 비공개 `creator_fit`
+의 ceiling 과소 보고(P2) · `engagement` 의 `like_count` NULL→0 이 "반응 없음" 과
+"모름" 을 섞는 문제(P2) · 프로필 보강 버킷이 로그에만 있고 DB·readiness 에 없음
+(영속화에 schema 변경이 필요해 비용이 큼).
 
 ## Optional / 진행을 막지 않음
 
