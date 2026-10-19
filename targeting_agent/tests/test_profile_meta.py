@@ -4,6 +4,7 @@ Instagram에 접속하지 않는다. 파서는 문자열만, 보강 패스는 Fa
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 import pytest
@@ -122,8 +123,8 @@ def test_creator마다_한_번만_프로필을_연다():
     candidates = discovery.discover()
 
     assert browser.opened == ["creator_a", "creator_b"]  # 후보 3건이지만 2번만 연다
-    assert discovery.profiles_read == 2
-    assert discovery.followers_found == 2
+    assert discovery.profile_attempts == 2
+    assert discovery.profile_followers_found == 2
     assert {c.followers for c in candidates} == {5000, 8000}
 
 
@@ -191,7 +192,7 @@ def test_read_profile이_없는_브라우저도_동작한다():
     )
 
     assert len(discovery.discover()) == 1
-    assert discovery.profiles_read == 0
+    assert discovery.profile_attempts == 0
 
 
 def test_프로필_실패가_run을_멈추지_않는다():
@@ -207,6 +208,124 @@ def test_프로필_실패가_run을_멈추지_않는다():
     candidates = discovery.discover()
 
     assert len(candidates) == 1  # 후보는 그대로 남는다
+
+
+# --- 전멸 관측성(P1-2) ------------------------------------------------------
+def _run_enrich(metas: dict, names: list[str], *, boom: set[str] | None = None, caplog=None):
+    """Creator마다 한 후보씩 만들어 discover를 돌린다. boom에 든 이름은 reader가 예외를 던진다."""
+    pairs = [(f"C{i:03d}", name) for i, name in enumerate(names)]
+    browser = browser_with_creators(pairs, metas)
+    if boom:
+        original = browser.read_profile
+
+        def reader(username: str):
+            if username in boom:
+                raise RuntimeError("profile load failed")
+            return original(username)
+
+        browser.read_profile = reader  # type: ignore[assignment]
+    discovery = InstagramBrowserDiscovery(browser, ["직장인"], max_candidates_per_query=10)
+    return discovery, discovery.discover()
+
+
+def _enrich_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and "프로필 보강" in r.getMessage()]
+
+
+def test_비공개_아닌_3명_전원_파싱실패면_경고한다(caplog):
+    names = ["a", "b", "c"]
+    metas = {n: ProfileMeta(username=n, followers=None) for n in names}
+    with caplog.at_level(logging.WARNING):
+        discovery, _ = _run_enrich(metas, names)
+
+    warnings = _enrich_warnings(caplog)
+    assert len(warnings) == 1
+    assert "전멸" in warnings[0]
+    assert "시도 3" in warnings[0]  # 분모 포함
+    assert "og:description" in warnings[0]
+    assert discovery.profile_parse_failed == 3
+
+
+def test_비공개_3명만으로_0이면_경고하지_않는다(caplog):
+    names = ["a", "b", "c"]
+    metas = {n: ProfileMeta(username=n, followers=None, is_private=True) for n in names}
+    with caplog.at_level(logging.WARNING):
+        discovery, _ = _run_enrich(metas, names)
+
+    assert _enrich_warnings(caplog) == []
+    assert discovery.profile_private == 3
+    assert discovery.profile_parse_failed == 0
+
+
+def test_표본_2명_전원_실패는_경고하지_않는다(caplog):
+    names = ["a", "b"]
+    metas = {n: ProfileMeta(username=n, followers=None) for n in names}
+    with caplog.at_level(logging.WARNING):
+        discovery, _ = _run_enrich(metas, names)
+
+    assert _enrich_warnings(caplog) == []
+    assert discovery.profile_parse_failed == 2
+
+
+def test_팔로워를_한_건이라도_확보하면_경고하지_않는다(caplog):
+    names = ["a", "b", "c", "d"]
+    metas = {
+        "a": ProfileMeta(username="a", followers=5000),
+        "b": ProfileMeta(username="b", followers=None),
+        "c": ProfileMeta(username="c", followers=None),
+        "d": ProfileMeta(username="d", followers=None),
+    }
+    with caplog.at_level(logging.WARNING):
+        discovery, _ = _run_enrich(metas, names)
+
+    assert _enrich_warnings(caplog) == []
+    assert discovery.profile_followers_found == 1
+
+
+def test_사유별_카운터_합이_시도_수와_같다(caplog):
+    names = ["ok", "priv", "nofollow", "unopened", "crash"]
+    metas = {
+        "ok": ProfileMeta(username="ok", followers=5000),
+        "priv": ProfileMeta(username="priv", followers=None, is_private=True),
+        "nofollow": ProfileMeta(username="nofollow", followers=None),
+        # unopened는 metas에 없어 reader가 None을 돌려준다
+    }
+    with caplog.at_level(logging.WARNING):
+        discovery, _ = _run_enrich(metas, names, boom={"crash"})
+
+    assert discovery.profile_attempts == 5
+    assert discovery.profile_followers_found == 1
+    assert discovery.profile_private == 1
+    assert discovery.profile_parse_failed == 1
+    assert discovery.profile_unopened == 1
+    assert discovery.profile_errors == 1
+    assert discovery.profile_accounted() is True
+    assert not any("집계 불일치" in m for m in _enrich_warnings(caplog))
+
+
+def test_집계가_어긋나면_로그로_드러난다(caplog):
+    names = ["a"]
+    metas = {"a": ProfileMeta(username="a", followers=1000)}
+    discovery, candidates = _run_enrich(metas, names)
+    assert discovery.profile_accounted() is True
+
+    discovery.profile_attempts += 1  # 설명되지 않는 시도를 강제로 만든다
+    assert discovery.profile_accounted() is False
+    with caplog.at_level(logging.WARNING):
+        discovery._enrich_followers(candidates)  # 예외 없이 WARNING으로만 드러난다
+
+    assert any("집계 불일치" in m for m in _enrich_warnings(caplog))
+
+
+def test_reader_예외는_격리되고_나머지는_계속_처리된다():
+    names = ["crash", "a"]
+    metas = {"a": ProfileMeta(username="a", followers=7000)}
+    discovery, candidates = _run_enrich(metas, names, boom={"crash"})
+
+    assert len(candidates) == 2  # 후보는 그대로 남는다
+    assert discovery.profile_errors == 1
+    assert discovery.profile_followers_found == 1
+    assert {c.followers for c in candidates} == {0, 7000}
 
 
 # --- 점수 효과 -------------------------------------------------------------

@@ -78,6 +78,10 @@ from .url_input import candidate_from_url, normalize_instagram_url
 
 logger = get_logger("discovery.browser")
 
+# 프로필 보강이 전멸했을 때 WARNING을 내는 최소 표본(비공개가 아니면서 meta를 받은 Creator 수).
+# 1~2건 전멸은 우연일 수 있고 실행당 프로필 상한이 10이라, 3건부터 파서 불일치로 의심한다.
+PROFILE_PARSE_FAIL_WARN_MIN = 3
+
 
 class BrowserPage(Protocol):
     """Discovery가 사용하는 브라우저 동작(읽기 전용).
@@ -439,6 +443,7 @@ class PlaywrightBrowser:
         """
         url = profile_url(username, base_url=self.base_url)
         if not url:
+            logger.info("프로필 주소를 만들 수 없습니다(%s).", username)
             return None
         try:
             self.goto(url)
@@ -580,8 +585,13 @@ class InstagramBrowserDiscovery(DiscoverySource):
             SessionState.PLATFORM_WARNING: stop_on_warning,
         }
         self.stats = DiscoveryStats()
-        self.profiles_read = 0
-        self.followers_found = 0
+        # 프로필 보강 카운터 — 시도한 Creator는 반드시 아래 사유 중 하나로 설명된다.
+        self.profile_attempts = 0  # 루프를 돈 Creator 수
+        self.profile_followers_found = 0  # followers 확보
+        self.profile_private = 0  # 비공개라 followers 없음
+        self.profile_parse_failed = 0  # meta는 받았지만 followers 파싱 실패(비공개 아님)
+        self.profile_unopened = 0  # reader가 None 반환(열지 못함)
+        self.profile_errors = 0  # reader 예외
         # 같은 Run에서 같은 Reel을 찾은 검색어들(19D: 후보 행은 하나, 검색어는 여러 개).
         # 키는 shortcode다 — /p/ 와 /reel/ 두 형태가 같은 게시물을 가리킬 수 있다.
         self._by_code: dict[str, RawCandidate] = {}
@@ -697,13 +707,15 @@ class InstagramBrowserDiscovery(DiscoverySource):
             by_creator.setdefault(name, []).append(candidate)
 
         for username in list(by_creator)[: self.max_profiles]:
+            self.profile_attempts += 1
             try:
                 meta = reader(username)
             except Exception as exc:  # noqa: BLE001 - 프로필 1건 실패를 격리한다
                 logger.warning("프로필 읽기 실패(%s): %s", username, type(exc).__name__)
+                self.profile_errors += 1
                 continue
-            self.profiles_read += 1
             if meta is None:
+                self.profile_unopened += 1
                 continue
             for candidate in by_creator[username]:
                 if meta.followers is not None:
@@ -712,11 +724,53 @@ class InstagramBrowserDiscovery(DiscoverySource):
                 if meta.is_private:
                     candidate.is_private = True
             if meta.followers is not None:
-                self.followers_found += 1
+                self.profile_followers_found += 1
+            elif meta.is_private:
+                self.profile_private += 1
+            else:
+                self.profile_parse_failed += 1
         logger.info(
-            "프로필 보강: %d개 Creator 확인 · 팔로워 확보 %d",
-            self.profiles_read,
-            self.followers_found,
+            "프로필 보강: 시도 %d · 팔로워 확보 %d · 비공개 %d · 파싱실패 %d · 열지못함 %d · 오류 %d",
+            self.profile_attempts,
+            self.profile_followers_found,
+            self.profile_private,
+            self.profile_parse_failed,
+            self.profile_unopened,
+            self.profile_errors,
+        )
+        if not self.profile_accounted():
+            # 설명되지 않은 Creator가 있으면 조용히 넘기지 않는다.
+            logger.warning(
+                "프로필 보강 집계 불일치: 시도 %d ≠ 확보 %d + 비공개 %d + 파싱실패 %d + 열지못함 %d + 오류 %d",
+                self.profile_attempts,
+                self.profile_followers_found,
+                self.profile_private,
+                self.profile_parse_failed,
+                self.profile_unopened,
+                self.profile_errors,
+            )
+        if self.profile_followers_found == 0 and self.profile_parse_failed >= PROFILE_PARSE_FAIL_WARN_MIN:
+            # 비공개 계정만으로 0이 된 경우는 여기에 오지 않는다(분모가 비공개 제외).
+            logger.warning(
+                "프로필 보강 전멸: 비공개가 아닌 프로필 %d건에서 팔로워를 한 건도 읽지 못했습니다"
+                "(시도 %d · 비공개 %d · 열지못함 %d · 오류 %d). "
+                "Instagram 공개 프로필 메타(og:description) 형식이 파서 기대와 다를 수 있습니다. "
+                "creator_fit은 중립값으로 남습니다.",
+                self.profile_parse_failed,
+                self.profile_attempts,
+                self.profile_private,
+                self.profile_unopened,
+                self.profile_errors,
+            )
+
+    def profile_accounted(self) -> bool:
+        """시도한 Creator가 확보/비공개/파싱실패/열지못함/오류 중 하나로 모두 설명되는지."""
+        return self.profile_attempts == (
+            self.profile_followers_found
+            + self.profile_private
+            + self.profile_parse_failed
+            + self.profile_unopened
+            + self.profile_errors
         )
 
     @staticmethod
