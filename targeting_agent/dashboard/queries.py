@@ -392,24 +392,30 @@ def _score_text(value: Optional[float]) -> str:
     return "-" if value is None else f"{float(value):.1f}"
 
 
-def score_missing(conn: sqlite3.Connection, config: Any) -> dict[str, str]:
+def score_missing(conn: sqlite3.Connection, config: Any = None) -> dict[str, Any]:
     """입력 결측(중립값으로 채점된 축) 비율(P2-3, 읽기 전용).
 
-    비율 정의는 readiness.calibration 한 곳에만 있고 여기서는 읽어서 포맷만 한다.
-    주의: collect_calibration은 candidate_media ⋈ media_analysis **전건 스캔**이다.
-    후보가 많아지면 Dashboard 렌더 비용이 늘어난다(캐시는 아직 없다).
-    표본이 없으면 0%가 아니라 "-".
-    """
-    from ..readiness.calibration import collect_calibration
+    분모는 readiness 경고와 같다: **Browser source 후보 전체**(기록 + 추정). Import 후보는
+    애초에 followers가 없어 섞으면 구조적 오경보가 된다. 비율 정의는 readiness.calibration
+    한 곳에만 있고 여기서는 읽어서 포맷만 한다. 표본이 없으면 0%가 아니라 "-".
 
-    calibration = collect_calibration(conn, config)
-    rates = calibration.missing_rates()
-    return {
-        "creator_fit": _rate_text(rates["creator_fit"]),
-        "activity": _rate_text(rates["activity"]),
-        "engagement": _rate_text(rates["engagement"]),
-        "coverage": _rate_text(calibration.recorded_coverage),
-    }
+    비용: `load_candidates`는 candidate_media ⋈ media_analysis **전건 스캔**이다(렌더마다 실행,
+    캐시 없음). 그래서 findings·feedback 조회까지 도는 `collect_calibration`이 아니라
+    후보 적재만 호출한다. `config`는 호출 호환용이며 쓰지 않는다.
+    """
+    from ..readiness.calibration import BROWSER_SOURCE, ScoreCalibration, load_candidates
+
+    load = load_candidates(conn)
+    view = ScoreCalibration(candidates=load.candidates)
+    rates = view.missing_rates(BROWSER_SOURCE)
+    recorded, total = view.recorded_counts(BROWSER_SOURCE)
+    result: dict[str, Any] = {axis: _rate_text(rate) for axis, rate in rates.items()}
+    result["coverage"] = (
+        "-" if not total else f"{_rate_text(recorded / total)} (기록 {recorded}/전체 {total})"
+    )
+    result["browser_total"] = total
+    result["corrupted"] = load.corrupted_flags
+    return result
 
 
 def discovery_health(

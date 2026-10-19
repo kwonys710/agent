@@ -13,7 +13,7 @@ from targeting_agent.analysis.profile_analyzer import TargetProfile
 from targeting_agent.analysis.scorer import TargetScorer, missing_inputs_for_row
 from targeting_agent.core.config import Config
 from targeting_agent.core.models import ContentAnalysis
-from targeting_agent.dashboard import queries
+from targeting_agent.dashboard import app, queries
 
 BROWSER = "instagram_browser_search"
 
@@ -94,7 +94,9 @@ def test_to_dict에_missing_inputs가_추가되고_기존_키는_유지된다(co
 
 
 # --- 6. Dashboard 표시 -------------------------------------------------------
-def _insert(conn: sqlite3.Connection, media_id: str, *, missing: list[str]) -> None:
+def _insert(
+    conn: sqlite3.Connection, media_id: str, *, missing: list[str], source: str = BROWSER
+) -> None:
     cursor = conn.execute(
         "INSERT INTO creators (username, followers, status, first_seen_at, updated_at) "
         "VALUES (?, 5000, 'NEW', '2026-10-01', '2026-10-01')",
@@ -106,7 +108,7 @@ def _insert(conn: sqlite3.Connection, media_id: str, *, missing: list[str]) -> N
             source, status, posted_at, discovered_at, updated_at)
            VALUES (?, ?, ?, ?, 'REEL', '', '[]', ?, 'SCORED', '2026-10-01',
                    '2026-10-01', '2026-10-01')""",
-        (media_id, int(cursor.lastrowid), f"https://x/{media_id}/", f"https://x/{media_id}/", BROWSER),
+        (media_id, int(cursor.lastrowid), f"https://x/{media_id}/", f"https://x/{media_id}/", source),
     )
     components = {
         "content_similarity": 0.9,
@@ -138,7 +140,8 @@ def _insert(conn: sqlite3.Connection, media_id: str, *, missing: list[str]) -> N
 def test_표본이_없으면_결측률은_0퍼센트가_아니라_하이픈이다(conn, config):
     text = queries.score_missing(conn, config)
 
-    assert text == {"creator_fit": "-", "activity": "-", "engagement": "-", "coverage": "-"}
+    assert (text["creator_fit"], text["activity"], text["engagement"]) == ("-", "-", "-")
+    assert text["coverage"] == "-"
 
 
 def test_표본이_있으면_결측률을_퍼센트로_보여_준다(conn, config):
@@ -150,4 +153,72 @@ def test_표본이_있으면_결측률을_퍼센트로_보여_준다(conn, confi
     assert text["creator_fit"] == "50%"
     assert text["engagement"] == "50%"
     assert text["activity"] == "0%"  # 표본이 있는 0%는 진짜 0%
-    assert text["coverage"] == "100%"
+    assert text["coverage"] == "100% (기록 2/전체 2)"
+
+
+def test_타일은_browser_후보만_분모로_삼는다(conn, config):
+    """Import 후보는 애초에 followers가 없다 — 섞으면 구조적 오경보다(경고와 같은 정의)."""
+    _insert(conn, "AAA111", missing=["creator_fit"], source="import:sample.csv")
+    _insert(conn, "BBB222", missing=["creator_fit"], source="import:sample.csv")
+
+    text = queries.score_missing(conn, config)
+
+    assert text["creator_fit"] == "-"
+    assert text["coverage"] == "-"
+    assert text["browser_total"] == 0
+
+
+def test_손상된_결측_기록_건수를_타일_쪽에서도_센다(conn, config):
+    _insert(conn, "AAA111", missing=[])
+    conn.execute(
+        "UPDATE media_analysis SET score_breakdown = json_set(score_breakdown, "
+        "'$.missing_inputs', 'creator_fit')"
+    )
+
+    assert queries.score_missing(conn, config)["corrupted"] == 1
+
+
+# --- Dashboard 렌더 --------------------------------------------------------
+def test_점수_막대는_입력없음_축을_구분해_표시한다():
+    html_text = app._score_bars(
+        {
+            "components": {"creator_fit": 0.5, "activity": 0.5},
+            "missing_inputs": ["creator_fit"],
+            "notes": [],
+        }
+    )
+
+    assert "creator_fit (입력없음)" in html_text
+    assert "activity (입력없음)" not in html_text  # 진짜로 0.5인 축은 표시하지 않는다
+
+
+def test_점수_막대는_손상된_missing_inputs를_무시한다():
+    html_text = app._score_bars(
+        {"components": {"creator_fit": 0.5}, "missing_inputs": "creator_fit", "notes": []}
+    )
+
+    assert "입력없음" not in html_text
+
+
+def test_손상된_breakdown_하나가_discovery_health_전체를_죽이지_않는다(conn, config, caplog):
+    _insert(conn, "AAA111", missing=[])
+    conn.execute("UPDATE media_analysis SET score_breakdown = '{깨진 json'")
+
+    with caplog.at_level("WARNING"):
+        html_text = app._discovery_health(conn, config)
+
+    assert "creator_fit 결측(browser)" in html_text
+    assert "결측 비율 계산 실패" in caplog.text  # 조용히 삼키지 않는다
+
+
+def test_타일은_수집기_전체가_아니라_후보_적재만_호출한다(conn, config, monkeypatch):
+    """렌더마다 findings·feedback 조회까지 도는 비용을 피한다."""
+    from targeting_agent.readiness import calibration
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("collect_calibration을 호출하면 안 된다")
+
+    monkeypatch.setattr(calibration, "collect_calibration", _boom)
+    _insert(conn, "AAA111", missing=[])
+
+    assert queries.score_missing(conn, config)["coverage"] == "100% (기록 1/전체 1)"

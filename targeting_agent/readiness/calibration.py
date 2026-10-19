@@ -22,6 +22,13 @@ engagement = 0.5, posted_at을 모르면 activity = 0.5). 이 중립값은 "보�
 - language_region: 정보 없음 중립값이 0.4로 집합이 달라 0.5 중립값 모델에 맞지 않는다.
 - content_similarity: 0.0이 "정보 없음"인지 "무관함"인지는 새 입력 없이 구분할 수 없다.
 이 축들을 NEUTRAL_VALUES에 넣으면 기존 ceiling / headroom 수식이 틀어진다.
+
+알려진 한계: 비공개 계정의 creator_fit은 영원히 0.0(중립값이 아님)인데 `ceiling`은 이를
+"아는 축"으로 보고 1.0을 가정한다. 그래서 비공개 후보의 `COMMENT 도달 불가`가 과소 보고될 수
+있다(수식은 이번 범위에서 바꾸지 않았다. 현재 동작은 테스트로 고정돼 있다).
+
+결측 경고·Dashboard 타일은 같은 정의를 쓴다: **Browser source 후보 전체**(기록 행 + 추정 행).
+기록 행만 세면 재채점 윈도우(점수 상위 N건)가 결측 행을 구조적으로 못 덮어 표본이 편향된다.
 """
 from __future__ import annotations
 
@@ -43,10 +50,12 @@ NEUTRAL_VALUES: Mapping[str, float] = {
     "engagement": 0.5,
 }
 
-# 결측 경고 조건(전부 AND): Browser 후보 · 표본 N >= MIN_MISSING_SAMPLES ·
-# 단일 축 결측률 >= MISSING_WARNING_RATE · 결측이 **기록된** 행만 센다.
+# 결측 경고 조건(전부 AND): Browser 후보 전체(기록+추정) · 표본 N >= MIN_MISSING_SAMPLES ·
+# 단일 축 결측률 >= MISSING_WARNING_RATE. 기록된 비율은 경고 문구에 "기록 N/전체 M"으로 밝힌다.
 MIN_MISSING_SAMPLES = 20
 MISSING_WARNING_RATE = 0.50
+# Browser 후보의 기록 커버리지가 이 아래면 "추정 기준"이라는 안내를 따로 낸다.
+LOW_RECORDED_COVERAGE = 0.50
 
 # CandidateScore.unknown_source 값.
 UNKNOWN_RECORDED = "recorded"  # 채점 시점에 breakdown.missing_inputs로 기록됨
@@ -205,13 +214,15 @@ class ComponentStat:
     def as_row(self) -> str:
         if not self.values:
             return "표본 없음"
+        # 중립값이 없는 축(language_region 등)의 0은 측정값이 아니라 "해당 없음"이다.
+        neutral = str(self.neutral_count) if self.name in NEUTRAL_VALUES else "-"
         return (
             f"mean {statistics.mean(self.values):.3f} · "
             f"median {statistics.median(self.values):.3f} · "
             f"P25 {self._quantile(0.25):.3f} · P75 {self._quantile(0.75):.3f} · "
             f"min {min(self.values):.2f} · max {max(self.values):.2f} · "
             f"정보없음 {self.unknown_count}/{len(self.values)} · "
-            f"중립값 {self.neutral_count}"
+            f"중립값 {neutral}"
         )
 
 
@@ -231,6 +242,9 @@ class ScoreCalibration:
     findings: list[str] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
     missing_warnings: list[str] = field(default_factory=list)
+    # missing_inputs 기록이 list가 아니라 손상돼 추정으로 대체한 행 수 / 버린 축 이름 수.
+    corrupted_flags: int = 0
+    dropped_axes: int = 0
 
     @property
     def total(self) -> int:
@@ -271,6 +285,21 @@ class ScoreCalibration:
             item for item in self.candidates if item.metadata_decisive(self.minimum_score)
         ]
 
+    def _pool(self, source: Optional[str], recorded_only: bool) -> list[CandidateScore]:
+        return [
+            item
+            for item in self.candidates
+            if (source is None or item.source == source) and (item.recorded or not recorded_only)
+        ]
+
+    def missing_counts(
+        self, source: Optional[str] = None, *, recorded_only: bool = False
+    ) -> tuple[dict[str, int], int]:
+        """축별 결측 건수와 표본 수. 결측 판정과 비율 정의는 여기 한 곳에만 있다."""
+        pool = self._pool(source, recorded_only)
+        counts = {axis: sum(1 for item in pool if axis in item.unknown) for axis in NEUTRAL_VALUES}
+        return counts, len(pool)
+
     def missing_rates(
         self, source: Optional[str] = None, *, recorded_only: bool = False
     ) -> dict[str, Optional[float]]:
@@ -278,22 +307,19 @@ class ScoreCalibration:
 
         `source`가 있으면 그 source 후보만, `recorded_only`면 결측이 기록된 행만 센다.
         """
-        pool = [
-            item
-            for item in self.candidates
-            if (source is None or item.source == source) and (item.recorded or not recorded_only)
-        ]
-        return {
-            axis: (sum(1 for item in pool if axis in item.unknown) / len(pool) if pool else None)
-            for axis in NEUTRAL_VALUES
-        }
+        counts, total = self.missing_counts(source, recorded_only=recorded_only)
+        return {axis: (count / total if total else None) for axis, count in counts.items()}
+
+    def recorded_counts(self, source: Optional[str] = None) -> tuple[int, int]:
+        """(결측이 채점 시점에 기록된 행 수, 전체 행 수)."""
+        pool = self._pool(source, False)
+        return sum(1 for item in pool if item.recorded), len(pool)
 
     @property
     def recorded_coverage(self) -> Optional[float]:
         """결측이 채점 시점에 기록된 행의 비율. 후보가 없으면 None."""
-        if not self.candidates:
-            return None
-        return sum(1 for item in self.candidates if item.recorded) / len(self.candidates)
+        recorded, total = self.recorded_counts()
+        return recorded / total if total else None
 
     def scores(self) -> list[float]:
         return [item.score for item in self.candidates]
@@ -337,15 +363,17 @@ class ScoreCalibration:
         }
         for name, stat in self.components.items():
             rows[f"축 · {name}"] = stat.as_row()
-        rows["축별 결측률"] = ", ".join(
-            f"{axis} {_rate_text(rate)}" for axis, rate in self.missing_rates().items()
+        # 경고·Dashboard 타일과 같은 정의(Browser 후보 전체)로 보여 준다.
+        rows["축별 결측률(browser)"] = ", ".join(
+            f"{axis} {_rate_text(rate)}" for axis, rate in self.missing_rates(BROWSER_SOURCE).items()
         )
-        recorded = sum(1 for item in self.candidates if item.recorded)
-        rows["결측 기록 커버리지"] = (
-            f"{_rate_text(self.recorded_coverage)} ({recorded}/{self.total})"
+        recorded, browser_total = self.recorded_counts(BROWSER_SOURCE)
+        rows["결측 기록 커버리지(browser)"] = (
+            f"{_rate_text(recorded / browser_total if browser_total else None)} "
+            f"(기록 {recorded}/전체 {browser_total})"
         )
         rows["복원 불가 축"] = (
-            "복원 불가 축: content_similarity 0.00 / novelty 1.00 / language_region 0.40 은 "
+            "content_similarity 0.00 / novelty 1.00 / language_region 0.40 은 "
             '"정보 없음"과 구분되지 않습니다'
         )
         return rows
@@ -370,14 +398,21 @@ def _count_bands(items: Iterable[CandidateScore]) -> dict[str, int]:
     return counts
 
 
-def collect_calibration(conn: sqlite3.Connection, config: Config) -> ScoreCalibration:
-    """실제 후보의 점수를 분해한다. **쓰기도 LLM 호출도 하지 않는다.**"""
-    result = ScoreCalibration(
-        like_threshold=float(config.get("actions.require_score_for_like", 75)),
-        comment_threshold=float(config.get("actions.require_score_for_comment", 82)),
-        minimum_score=float(config.get("scoring.minimum_target_score", 70)),
-    )
+@dataclass
+class CandidateLoad:
+    """후보 적재 결과. Dashboard는 이것만 읽는다(수집기 전체를 돌리지 않는다)."""
 
+    candidates: list[CandidateScore] = field(default_factory=list)
+    corrupted_flags: int = 0
+    dropped_axes: int = 0
+
+
+def load_candidates(conn: sqlite3.Connection) -> CandidateLoad:
+    """후보별 점수 분해를 적재한다(후보당 가장 최근 분석 1건). 쓰기도 LLM 호출도 없다.
+
+    candidate_media ⋈ media_analysis 전건 스캔이다.
+    """
+    load = CandidateLoad()
     seen: set[int] = set()
     cursor = conn.execute(_CANDIDATE_SQL)
     columns = [description[0] for description in cursor.description]
@@ -395,12 +430,17 @@ def collect_calibration(conn: sqlite3.Connection, config: Config) -> ScoreCalibr
         # `[]`는 "기록됐고 결측 없음"이므로 falsy로 레거시와 혼동하면 안 된다.
         recorded_inputs = breakdown.get("missing_inputs")
         if isinstance(recorded_inputs, list):
-            unknown = tuple(str(axis) for axis in recorded_inputs)
+            # 데이터 유래 값이므로 중립값 모델에 있는 축만 받는다(ceiling/headroom 정합).
+            names = [str(axis) for axis in recorded_inputs]
+            unknown = tuple(axis for axis in names if axis in NEUTRAL_VALUES)
+            load.dropped_axes += len(names) - len(unknown)
             unknown_source = UNKNOWN_RECORDED
         else:
+            if recorded_inputs is not None:
+                load.corrupted_flags += 1  # list가 아닌 값 — 레거시와 구분해 센다
             unknown = missing_inputs_for_row(row)
             unknown_source = UNKNOWN_ESTIMATED
-        result.candidates.append(
+        load.candidates.append(
             CandidateScore(
                 media_pk=media_pk,
                 media_id=str(row["media_id"] or ""),
@@ -412,6 +452,20 @@ def collect_calibration(conn: sqlite3.Connection, config: Config) -> ScoreCalibr
                 unknown_source=unknown_source,
             )
         )
+    return load
+
+
+def collect_calibration(conn: sqlite3.Connection, config: Config) -> ScoreCalibration:
+    """실제 후보의 점수를 분해한다. **쓰기도 LLM 호출도 하지 않는다.**"""
+    result = ScoreCalibration(
+        like_threshold=float(config.get("actions.require_score_for_like", 75)),
+        comment_threshold=float(config.get("actions.require_score_for_comment", 82)),
+        minimum_score=float(config.get("scoring.minimum_target_score", 70)),
+    )
+    load = load_candidates(conn)
+    result.candidates = load.candidates
+    result.corrupted_flags = load.corrupted_flags
+    result.dropped_axes = load.dropped_axes
 
     result.bands = _count_bands(result.candidates)
     result.bands_browser = _count_bands(result.browser_candidates)
@@ -432,6 +486,7 @@ def collect_calibration(conn: sqlite3.Connection, config: Config) -> ScoreCalibr
     result.human_approvals = int(row[0]) if row else 0
 
     _add_findings(result)
+    _add_integrity_findings(result)
     _add_missing_warnings(result)
     return result
 
@@ -439,22 +494,44 @@ def collect_calibration(conn: sqlite3.Connection, config: Config) -> ScoreCalibr
 def _add_missing_warnings(result: ScoreCalibration) -> None:
     """Browser 후보의 입력 결측이 구조적으로 많을 때만 경고한다(오경보 방지).
 
-    기록 플래그가 있는 행만 센다 — 추정 행과 Import 후보(애초에 followers가 없다)는 제외.
+    Browser 후보 **전체**(기록 + 추정)를 센다. 기록 행만 세면 재채점 윈도우(점수 상위 N건)가
+    결측 행을 구조적으로 못 덮어 결측이 심할수록 경고가 안 뜬다. Import 후보는 애초에
+    followers가 없으므로 source로 제외한다.
     """
-    recorded = [item for item in result.browser_candidates if item.recorded]
-    if len(recorded) < MIN_MISSING_SAMPLES:
+    counts, total = result.missing_counts(BROWSER_SOURCE)
+    if total < MIN_MISSING_SAMPLES:
         return
-    rates = result.missing_rates(BROWSER_SOURCE, recorded_only=True)
+    recorded, _ = result.recorded_counts(BROWSER_SOURCE)
     high = [
-        f"{axis} {sum(1 for item in recorded if axis in item.unknown)}/{len(recorded)}"
-        f"({rate * 100:.0f}%)"
-        for axis, rate in rates.items()
-        if rate is not None and rate >= MISSING_WARNING_RATE
+        f"{axis} {count}/{total}({count / total * 100:.0f}%)"
+        for axis, count in counts.items()
+        if count / total >= MISSING_WARNING_RATE
     ]
     if high:
         result.missing_warnings.append(
-            f"Browser 후보의 입력 결측이 많습니다: {', '.join(high)} — 중립값(0.5)으로 채점됐습니다. "
-            "임계값을 내리는 대신 빠진 정보(작성자 followers·게시 시각)를 채우세요."
+            f"Browser 후보의 입력 결측이 많습니다(기록 {recorded}/전체 {total}): "
+            f"{', '.join(high)} — 중립값(0.5)으로 채점됐습니다. 기록이 없는 행은 현재 DB 값으로 "
+            "추정한 것입니다. 임계값을 내리는 대신 빠진 정보(작성자 followers·게시 시각)를 채우세요."
+        )
+    if recorded / total < LOW_RECORDED_COVERAGE:
+        # 경고가 없어도 "문제 없음"이 아니다 — 추정 기준이면 결측이 과소 보고될 수 있다.
+        result.findings.append(
+            f"결측 기록 커버리지가 낮아 추정 기준입니다(기록 {recorded}/전체 {total}) — "
+            "채점 후 followers가 보강된 행은 결측으로 잡히지 않아 결측률이 낮게 보일 수 있습니다."
+        )
+
+
+def _add_integrity_findings(result: ScoreCalibration) -> None:
+    """결측 기록 자체가 손상된 경우를 조용히 넘기지 않는다."""
+    if result.corrupted_flags:
+        result.findings.append(
+            f"missing_inputs 기록이 손상된 행이 {result.corrupted_flags}건입니다 — "
+            "추정으로 대체했습니다(레거시 행과는 다른 문제이니 채점 저장 경로를 확인하세요)."
+        )
+    if result.dropped_axes:
+        result.findings.append(
+            f"missing_inputs에 알 수 없는 축 이름이 {result.dropped_axes}개 있어 버렸습니다 "
+            f"(허용: {', '.join(NEUTRAL_VALUES)})."
         )
 
 

@@ -441,13 +441,135 @@ def test_import_후보는_followers가_없어도_경고하지_않는다(conn: sq
     assert collect_calibration(conn, config).missing_warnings == []
 
 
-def test_추정_행은_경고_표본에_세지_않는다(conn: sqlite3.Connection, config: Config):
-    """레거시(추정) 행 30건이 전부 결측이어도 기록 행이 20건 미만이면 경고하지 않는다."""
+def test_추정_행도_분모에_포함해_경고하고_기록_비율을_밝힌다(conn: sqlite3.Connection, config: Config):
+    """레거시(추정) 30건이 전부 결측이면 기록 행이 0건이어도 경고가 떠야 한다."""
     for index in range(30):
         _insert(conn, f"leg{index:03d}", score=68.0, followers=0, posted_at=None)
-    _fill_browser(conn, 10, 10)
 
-    assert collect_calibration(conn, config).missing_warnings == []
+    warnings = collect_calibration(conn, config).missing_warnings
+
+    assert len(warnings) == 1
+    assert "기록 0/전체 30" in warnings[0]
+    assert "creator_fit 30/30(100%)" in warnings[0]
+
+
+def test_재채점_윈도우가_결측_행을_못_덮어도_경고가_뜬다(conn: sqlite3.Connection, config: Config):
+    """편향 표본 회귀: 기록 행은 입력 완비 100건뿐이고 결측 300건은 레거시다.
+
+    기록 행만 세면 결측률 0%라 영원히 경고가 안 뜬다. 전체 400건 중 75%가 결측이다.
+    """
+    _fill_browser(conn, 100, 0)
+    for index in range(300):
+        _insert(conn, f"leg{index:03d}", score=68.0, followers=0, posted_at="2026-10-01")
+
+    result = collect_calibration(conn, config)
+
+    assert len(result.missing_warnings) == 1
+    assert "기록 100/전체 400" in result.missing_warnings[0]
+    assert "creator_fit 300/400(75%)" in result.missing_warnings[0]
+
+
+def test_기록_커버리지가_낮으면_경고와_별도로_추정_기준_안내를_낸다(
+    conn: sqlite3.Connection, config: Config
+):
+    for index in range(20):  # 결측률이 낮아 경고는 없다
+        _insert(conn, f"leg{index:03d}", score=90.0, followers=5000, posted_at="2026-10-01")
+
+    result = collect_calibration(conn, config)
+
+    assert result.missing_warnings == []
+    assert any("추정 기준" in finding for finding in result.findings)
+
+
+def test_기록_커버리지가_충분하면_추정_기준_안내가_없다(conn: sqlite3.Connection, config: Config):
+    _fill_browser(conn, 20, 0)
+
+    result = collect_calibration(conn, config)
+
+    assert not any("추정 기준" in finding for finding in result.findings)
+
+
+# --- 손상된 플래그 / 알 수 없는 축 -----------------------------------------
+def _store_raw_flag(conn: sqlite3.Connection, value) -> None:
+    row = conn.execute("SELECT analysis_id, score_breakdown FROM media_analysis").fetchone()
+    breakdown = json.loads(row[1])
+    breakdown["missing_inputs"] = value
+    conn.execute(
+        "UPDATE media_analysis SET score_breakdown = ? WHERE analysis_id = ?",
+        (json.dumps(breakdown), row[0]),
+    )
+
+
+def test_손상된_결측_기록은_레거시와_구분해_세고_알린다(conn: sqlite3.Connection, config: Config):
+    _insert(conn, "AAA111", score=68.0, followers=0, posted_at="2026-10-01")
+    _store_raw_flag(conn, "creator_fit")  # list가 아니라 문자열
+
+    result = collect_calibration(conn, config)
+
+    assert result.corrupted_flags == 1
+    assert result.candidates[0].unknown_source == "estimated"  # 추정으로 대체
+    assert any("손상" in finding for finding in result.findings)
+
+
+def test_키가_없는_레거시_행은_손상으로_세지_않는다(conn: sqlite3.Connection, config: Config):
+    _insert(conn, "AAA111", score=68.0, followers=0, posted_at="2026-10-01")
+
+    result = collect_calibration(conn, config)
+
+    assert result.corrupted_flags == 0
+    assert not any("손상" in finding for finding in result.findings)
+
+
+def test_알_수_없는_축_이름은_버리고_센다(conn: sqlite3.Connection, config: Config):
+    """language_region이 unknown에 들어가면 ceiling(1.0)과 headroom(0.5)이 엇갈린다."""
+    _insert(conn, "AAA111", score=68.0, followers=5000, posted_at="2026-10-01")
+    _store_raw_flag(conn, ["language_region", "creator_fit", "bogus"])
+
+    result = collect_calibration(conn, config)
+    item = result.candidates[0]
+
+    assert item.unknown == ("creator_fit",)
+    assert result.dropped_axes == 2
+    assert item.ceiling == 90.0  # creator_fit 0.20 x 0.5 만큼만 깎인다
+    assert item.headroom == 10.0
+    assert any("알 수 없는 축" in finding for finding in result.findings)
+
+
+def test_중립값이_없는_축은_중립값을_하이픈으로_표시한다(conn: sqlite3.Connection, config: Config):
+    _insert(conn, "AAA111", score=68.0, followers=5000, posted_at="2026-10-01")
+
+    stats = collect_calibration(conn, config).components
+
+    assert stats["language_region"].as_row().endswith("중립값 -")
+    assert not stats["creator_fit"].as_row().endswith("중립값 -")
+
+
+# --- 변경 전 동작과의 차이를 고정한다 --------------------------------------
+def test_비공개_계정은_creator_fit이_결측이_아니라서_ceiling이_올라간다(
+    conn: sqlite3.Connection, config: Config
+):
+    """현재 동작 고정(레거시 추정). 과거에는 creator_fit이 unknown이라 ceiling 82.5였다.
+
+    알려진 한계: creator_fit은 비공개면 영원히 0.0인데 ceiling은 1.0을 가정해 과소 보고한다.
+    """
+    _insert(conn, "AAA111", score=60.0, followers=0, posted_at="2026-10-01")
+    conn.execute("UPDATE creators SET is_private = 1")
+
+    item = collect_calibration(conn, config).candidates[0]
+
+    assert item.unknown == ("engagement",)
+    assert item.ceiling == 92.5
+    assert item.headroom == 7.5
+
+
+def test_파싱_불가_posted_at은_activity_결측으로_센다(conn: sqlite3.Connection, config: Config):
+    """현재 동작 고정(버그 수정). 과거에는 값이 있으면 unknown이 아니었지만 scorer는 0.5를 썼다."""
+    _insert(conn, "AAA111", score=60.0, followers=5000, posted_at="어제쯤")
+
+    item = collect_calibration(conn, config).candidates[0]
+
+    assert item.unknown == ("activity",)
+    assert item.ceiling == 92.5
 
 
 def test_표본이_없으면_결측률은_none이다(conn: sqlite3.Connection, config: Config):
@@ -465,10 +587,10 @@ def test_as_rows에_결측_관련_행_3개가_추가된다(conn: sqlite3.Connect
 
     rows = collect_calibration(conn, config).as_rows()
 
-    assert rows["축별 결측률"].startswith("creator_fit 100%")
-    assert rows["결측 기록 커버리지"] == "100% (1/1)"
+    assert rows["축별 결측률(browser)"].startswith("creator_fit 100%")
+    assert rows["결측 기록 커버리지(browser)"] == "100% (기록 1/전체 1)"
     assert rows["복원 불가 축"] == (
-        '복원 불가 축: content_similarity 0.00 / novelty 1.00 / language_region 0.40 은 '
+        'content_similarity 0.00 / novelty 1.00 / language_region 0.40 은 '
         '"정보 없음"과 구분되지 않습니다'
     )
 
@@ -476,8 +598,8 @@ def test_as_rows에_결측_관련_행_3개가_추가된다(conn: sqlite3.Connect
 def test_표본이_없으면_as_rows는_하이픈이다(conn: sqlite3.Connection, config: Config):
     rows = collect_calibration(conn, config).as_rows()
 
-    assert rows["결측 기록 커버리지"] == "- (0/0)"
-    assert "100%" not in rows["축별 결측률"] and "0%" not in rows["축별 결측률"]
+    assert rows["결측 기록 커버리지(browser)"] == "- (기록 0/전체 0)"
+    assert "0%" not in rows["축별 결측률(browser)"]
 
 
 def test_결측_기록은_ceiling_headroom_저점수_원인_값을_바꾸지_않는다(

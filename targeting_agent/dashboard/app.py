@@ -251,11 +251,15 @@ def _score_bars(breakdown: dict[str, Any]) -> str:
     components = breakdown.get("components") or {}
     if not components:
         return '<p class="muted">점수 구성 정보가 없습니다.</p>'
+    # 입력이 없어서 중립값이 된 축은 "진짜 0.5"와 구분해 표시한다(P2-3).
+    flagged = breakdown.get("missing_inputs")
+    missing = {str(axis) for axis in flagged} if isinstance(flagged, list) else set()
     rows = []
     for name, value in components.items():
         percent = max(0.0, min(1.0, float(value))) * 100
+        label = f"{name} (입력없음)" if name in missing else name
         rows.append(
-            f'<div><span class="n">{e(name)}</span>'
+            f'<div><span class="n">{e(label)}</span>'
             f'<span class="bar" style="width:{percent:.0f}px"></span>'
             f'<span class="v">{percent:.0f}</span></div>'
         )
@@ -396,7 +400,12 @@ def _discovery_health(conn: sqlite3.Connection, config: Config) -> str:
     """
     health = queries.discovery_health(conn)
     engagement = queries.engagement_overview(conn, config)
-    missing = queries.score_missing(conn, config)
+    try:
+        missing = queries.score_missing(conn, config)
+    except Exception:  # 손상된 score_breakdown 1건이 Stats 탭 전체를 죽이지 않게 한다
+        logger.warning("결측 비율 계산 실패 — 타일을 '-'로 표시합니다", exc_info=True)
+        missing = {"creator_fit": "-", "activity": "-", "engagement": "-", "coverage": "-",
+                   "browser_total": 0, "corrupted": 0}
     novelty = health["novelty"]
     like = engagement["like"]
     comment = engagement["comment"]
@@ -437,15 +446,20 @@ def _discovery_health(conn: sqlite3.Connection, config: Config) -> str:
         ("댓글 Dry Run", comment["dry_run"]),
         ("댓글 게시 확인", comment["confirmed"]),
         ("댓글 확인 불가", comment["unknown"]),
-        ("creator_fit 결측", missing["creator_fit"]),
-        ("activity 결측", missing["activity"]),
-        ("engagement 결측", missing["engagement"]),
-        ("결측기록 커버리지", missing["coverage"]),
+        ("creator_fit 결측(browser)", missing["creator_fit"]),
+        ("activity 결측(browser)", missing["activity"]),
+        ("engagement 결측(browser)", missing["engagement"]),
+        ("결측기록 커버리지(browser)", missing["coverage"]),
     ]
 
     def tiles(cells: Sequence[tuple[str, Any]]) -> str:
         return "".join(f'<div class="stat">{e(k)}<b>{e(v)}</b></div>' for k, v in cells)
 
+    corrupted_note = (
+        f" 결측 기록이 손상된 행 {missing['corrupted']}건은 추정으로 처리했습니다."
+        if missing["corrupted"]
+        else ""
+    )
     batch = ", ".join(health["last_batch"]) or "선택 기록 없음"
     categories = (
         ", ".join(f"{name} {count}" for name, count in health["categories_run"].items()) or "-"
@@ -458,7 +472,9 @@ def _discovery_health(conn: sqlite3.Connection, config: Config) -> str:
         f'<div class="grid">{tiles(fresh_cells)}</div>'
         f'<div class="grid">{tiles(engagement_cells)}</div>'
         '<p class="muted">비율에 "-"가 보이면 표본이 없다는 뜻입니다(0%가 아닙니다). '
-        "LIKE/COMMENT 대상 수는 config의 추천 임계값을 그대로 씁니다.</p>"
+        "LIKE/COMMENT 대상 수는 config의 추천 임계값을 그대로 씁니다. "
+        "결측(browser)은 Browser 후보 전체 기준이며(Import 제외), 기록이 없는 행은 현재 DB 값으로 "
+        f"추정합니다.{corrupted_note}</p>"
     )
 
 
