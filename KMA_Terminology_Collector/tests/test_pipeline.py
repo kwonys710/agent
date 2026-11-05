@@ -127,6 +127,7 @@ class PipelineTest(unittest.TestCase):
         rows = list(csv.reader(raw.decode("utf-8-sig").splitlines()))
         self.assertEqual(rows[0][:3], ["term_id", "english_term", "korean_term"])
         self.assertNotIn("abbreviation", rows[0])  # 원본에 없는 컬럼은 만들지 않음
+        self.assertIn("korean_alternative", rows[0])  # 필수 컬럼(대체 용어)은 비어도 공란 유지
         self.assertIn(["Talveolus", "alveolus", "허파꽈리, 폐포"], [r[:3] for r in rows])
         self.assertIn("Na⁺/K⁺-ATPase", [r[1] for r in rows])
         self.assertEqual([r[1] for r in rows[1:]], sorted((r[1] for r in rows[1:]), key=str.lower))

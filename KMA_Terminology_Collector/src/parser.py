@@ -38,7 +38,7 @@ HANGUL = re.compile(r"[가-힣]")
 
 
 def _verbatim(tag):
-    # 강조 태그(<font><b>)만 제거. "1. 유산  2. 낙태" 처럼 원문 내부 공백은 그대로 둔다.
+    # 강조 태그(<font><b>)만 제거. "1. 뜻가  2. 뜻나" 처럼 원문 내부 공백(이중 공백)은 그대로 둔다.
     return re.sub(r"[\t\r\n]", " ", tag.get_text()).strip()
 
 

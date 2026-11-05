@@ -41,7 +41,8 @@ def export(conn, cfg, root, source="state.sqlite"):
     rep_dir.mkdir(parents=True, exist_ok=True)
 
     # 원본에 데이터가 하나도 없는 선택 컬럼은 출력하지 않는다(값을 만들어내지 않음).
-    present = [c for c in BASE_COLS if c not in FIELDS[2:] or
+    # 단 대체 용어(korean_alternative)는 필수 컬럼이라 비어 있어도 공란으로 둔다.
+    present = [c for c in BASE_COLS if c not in FIELDS[2:] or c == "korean_alternative" or
                conn.execute(f"SELECT 1 FROM terms WHERE TRIM(COALESCE({c},''))<>'' LIMIT 1").fetchone()]
     header, terms = _rows(conn, f"SELECT {', '.join(present)} FROM terms "
                                 f"ORDER BY english_term COLLATE NOCASE, korean_term")

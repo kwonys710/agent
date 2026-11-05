@@ -70,7 +70,7 @@ python -m playwright install chromium   # inspect 용 브라우저(이미 있으
 | 종료 감지 | 빈 목록 / 직전 페이지와 동일 내용 / `page × page_size ≥ 전체 건수` |
 | 재개 | SQLite(`data/processed/state.sqlite`)에서 처음으로 `ok` 가 아닌 페이지부터. 정상 페이지는 다시 받지 않음 |
 | 중복 | `term_id`(사이트 ID 우선, 없으면 영문+한글 해시) 기준. 중복은 버리지 않고 `term_dupes` 에 기록 |
-| 정규화 | 태그 제거, 공백·줄바꿈 정리만. 쉼표·괄호를 구분자로 쓰지 않음. 원본에 없는 컬럼은 출력하지 않음. layout=dl 은 원문 내부 공백도 보존(`1. 유산  2. 낙태`) |
+| 정규화 | 태그 제거, 공백·줄바꿈 정리만. 쉼표·괄호를 구분자로 쓰지 않음. 원본에 없는 컬럼은 출력하지 않음. layout=dl 은 원문 내부 공백도 보존(합성 예: `1. 뜻가  2. 뜻나`) |
 | dd 표지 | `[동]`→korean_alternative(한글)/english_synonym(영문), `[약]`→abbreviation, `[원]`·미확인 표지→notes 에 원문 그대로 |
 | 검색 조건 유지 | 사이트 페이지 링크는 `spelling_chk` 를 빠뜨려 조건이 바뀜 → `fixed_params` 를 매 요청에 보냄. 페이지 간 총건수가 바뀌면 `failed` 기록 후 중단 |
 | 복수대응어 | `variant_separator`(정규식)로 분리해 복수대응어 시트에만 기록. korean_term 은 원문 |

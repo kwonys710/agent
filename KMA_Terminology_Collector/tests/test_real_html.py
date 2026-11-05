@@ -3,6 +3,7 @@
 samples/a_substring/p1~3.html : 6.1판, 검색어 'a'(부분 일치), 1~3페이지
 tests/fixtures/prefix_p2.html : 6.1판, A–Z 색인 'a'(spelling_chk=1) 2페이지 앞 3행
 """
+import json
 import sys
 import tempfile
 import unittest
@@ -20,8 +21,10 @@ from validator import validate  # noqa: E402
 SAMPLES = ROOT / "samples" / "a_substring"
 FIXTURE = ROOT / "tests" / "fixtures" / "prefix_p2.html"
 # 실제 KMA 데이터는 저작권상 공개 저장소에 올리지 않는다(.gitignore). 없으면 건너뜀.
-HAVE_DATA = (SAMPLES / "p3.html").is_file() and FIXTURE.is_file()
+EXPECTED = ROOT / "tests" / "fixtures" / "real_expected.json"  # 기대값(실제 용어)도 로컬 전용
+HAVE_DATA = (SAMPLES / "p3.html").is_file() and FIXTURE.is_file() and EXPECTED.is_file()
 PREFIX_P2 = FIXTURE.read_text(encoding="utf-8") if HAVE_DATA else ""
+E = json.loads(EXPECTED.read_text(encoding="utf-8")) if HAVE_DATA else {}
 
 
 @unittest.skipUnless(HAVE_DATA, "실제 KMA 샘플 HTML 없음(로컬 전용 데이터)")
@@ -39,31 +42,35 @@ class RealHtmlTest(unittest.TestCase):
 
     def test_structure_total_and_exact_text(self):
         rows, total = self.rows(1)
-        self.assertEqual((len(rows), total), (15, 38793))
+        self.assertEqual((len(rows), total), (15, E["page1_total"]))
         by = {r["english_term"]: r for r in rows}
-        self.assertEqual(by["abdominal wall transplantation"]["korean_term"], "복벽이식")  # 강조태그 제거
-        self.assertEqual(by["A delta fiber"]["korean_term"], "A델타신경섬유")
-        self.assertEqual(by["abdomen"]["korean_term"], "배,복부")  # 원문 유지
-        self.assertEqual(parse_list(PREFIX_P2, self.cfg, "u")[1], 4233)
+        for en, ko in E["highlight_stripped"]:  # 강조 태그 제거
+            self.assertEqual(by[en]["korean_term"], ko)
+        en, ko = E["comma_kept"]
+        self.assertEqual(by[en]["korean_term"], ko)  # 쉼표 원문 유지
+        self.assertEqual(parse_list(PREFIX_P2, self.cfg, "u")[1], E["prefix_total"])
 
     def test_markers_and_verbatim_spacing(self):
         by = {r["english_term"]: r for p in (1, 2, 3) for r in self.rows(p)[0]}
-        self.assertEqual(by["a.c."]["korean_term"], "식전")
-        self.assertEqual(by["a.c."]["notes"], "[원] ante cibum")
-        self.assertEqual(by["5-hydroxytryptamine"]["abbreviation"], "5-HT")
-        self.assertEqual(by["abietic acid"]["korean_alternative"], "송진산")
-        self.assertEqual(by["abradant"]["english_synonym"], "abrasive")
-        self.assertEqual(by["abortion"]["korean_term"], "1. 유산  2. 낙태")  # 이중 공백 보존
+        en, ko, note = E["original_marker"]
+        self.assertEqual((by[en]["korean_term"], by[en]["notes"]), (ko, note))
+        for key, field in (("abbreviation", "abbreviation"), ("korean_synonym", "korean_alternative"),
+                           ("english_synonym", "english_synonym")):
+            en, val = E[key]
+            self.assertEqual(by[en][field], val)
+        en, ko = E["double_space"]
+        self.assertEqual(by[en]["korean_term"], ko)  # 원문 이중 공백 보존
         self.assertTrue(all(r["term_id"].startswith("h_") and r["term_id_source"] == "hash"
                             for r in by.values()))
 
     def test_variant_split_keeps_original(self):
         sep = self.cfg["parser"]["variant_separator"]
         by = {r["english_term"]: r for r in self.rows(2)[0]}
-        v = split_variants(by["abortive"], sep)
-        self.assertEqual([x["korean_variant"] for x in v], ["1. 부전-", "불현-", "2. 유산유발-"])
-        self.assertEqual(v[0]["original_korean"], "1. 부전-, 불현-  2. 유산유발-")
-        self.assertEqual(split_variants(by["abortion rate"], sep), [])
+        en, parts, original = E["variant_split"]
+        v = split_variants(by[en], sep)
+        self.assertEqual([x["korean_variant"] for x in v], parts)
+        self.assertEqual(v[0]["original_korean"], original)
+        self.assertEqual(split_variants(by[E["no_split"]], sep), [])
 
     def test_import_three_pages_end_to_end(self):
         kc.collect(self.cfg, self.conn, kc.make_file_fetcher(self.cfg, SAMPLES), max_pages=3,
@@ -82,7 +89,7 @@ class RealHtmlTest(unittest.TestCase):
         out = export(self.conn, self.cfg, Path(self.tmp))
         self.assertIn("REAL_SAMPLE_import", out["csv"])
         self.assertEqual(Path(out["csv"]).read_bytes()[:3], b"\xef\xbb\xbf")
-        self.assertIn("팔꿈치위절단", Path(out["csv"]).read_text(encoding="utf-8-sig"))
+        self.assertIn(E["in_csv"], Path(out["csv"]).read_text(encoding="utf-8-sig"))
         wb = load_workbook(out["xlsx"])
         self.assertEqual(len(wb.sheetnames), 6)
         self.assertGreater(wb["복수대응어"].max_row, 1)
