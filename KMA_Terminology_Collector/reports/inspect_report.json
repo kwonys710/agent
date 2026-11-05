@@ -1,0 +1,29 @@
+{
+ "status": "BLOCKED",
+ "attempts": [
+  {
+   "url": "https://term.kma.org/search/list.asp",
+   "error": "Error: Page.goto: net::ERR_CONNECTION_RESET at https://term.kma.org/search/list.asp"
+  },
+  {
+   "url": "http://term.kma.org/search/list.asp",
+   "error": "Error: Page.goto: net::ERR_NAME_NOT_RESOLVED at http://term.kma.org/search/list.asp"
+  }
+ ],
+ "requests": [
+  {
+   "method": "GET",
+   "url": "https://term.kma.org/search/list.asp",
+   "type": "document",
+   "post_data": null
+  },
+  {
+   "method": "GET",
+   "url": "http://term.kma.org/search/list.asp",
+   "type": "document",
+   "post_data": null
+  }
+ ],
+ "error": "모든 후보 URL 접속 실패 — 구조를 추정하지 않음",
+ "next_steps": "page2_navigation.request 의 method/파라미터와 page1.tables[].headers 를 보고 config/settings.yaml 의 pagination/parser 값을 채운 뒤 --mode sample 실행"
+}

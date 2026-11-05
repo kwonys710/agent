@@ -1,0 +1,5 @@
+data/raw/*.html
+data/processed/*.sqlite
+logs/*.log
+permission.json
+__pycache__/

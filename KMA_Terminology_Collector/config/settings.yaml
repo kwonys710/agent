@@ -1,0 +1,49 @@
+# 사이트별 값은 반드시 `--mode inspect` 결과(reports/inspect_report.json)로 확인한 뒤 채운다.
+# null 로 남은 필수 값이 있으면 sample/full/resume 은 실행을 거부한다(추측 금지).
+
+site:
+  base_url: "https://term.kma.org"
+  list_path: "/search/list.asp"
+  user_agent: "KMA-Terminology-Collector/0.1 (research use)"
+  respect_robots_txt: true
+
+pagination:
+  # inspect 에서 관찰한 실제 페이지 이동 요청으로 채운다.
+  method: null            # "GET" 또는 "POST"
+  page_param: null        # 관찰된 페이지 번호 파라미터 이름
+  fixed_params: {}        # 검색 조건 등 매 요청에 고정으로 보내는 값(관찰값 그대로)
+  page_size: null         # 페이지당 건수(관찰값). 모르면 null
+  start_page: 1
+
+parser:
+  row_selector: null      # 결과 행 CSS 선택자(관찰값). 예: "table.list tbody tr"
+  # 출력 컬럼 → 헤더 텍스트 정규식. inspect 의 tables[].headers 를 보고 확정한다.
+  header_map:
+    english_term: null
+    korean_term: null
+    korean_alternative: null
+    english_synonym: null
+    abbreviation: null
+    category: null
+    notes: null
+  detail_link_selector: "a[href]"
+  term_id_query_param: null   # 상세 URL 의 고유 ID 파라미터 이름(관찰값). 없으면 내용 해시 ID
+  total_count_regex: null     # 관찰된 결과 건수 문구 기준 정규식. 예: "총\\s*([\\d,]+)\\s*건"
+  variant_separator: null     # 원본에서 구분자가 명확할 때만 지정. null 이면 분리하지 않음
+  edition_label: "미확인"     # 화면/판본 선택으로 제6판이 확인된 경우에만 "제6판" 으로 변경
+
+throttle:
+  concurrency: 1          # 코드는 순차 요청만 한다
+  delay_min_sec: 3
+  delay_max_sec: 5
+  max_retries_5xx: 3
+  backoff_base_sec: 5
+  stop_status: [403, 429]
+  timeout_sec: 30
+
+paths:
+  raw_dir: "data/raw"
+  state_db: "data/processed/state.sqlite"
+  output_dir: "data/output"
+  log_dir: "logs"
+  report_dir: "reports"

@@ -1,0 +1,11 @@
+{
+  "approving_org": "대한의사협회 의학용어위원회",
+  "approval_date": "YYYY-MM-DD",
+  "approval_reference": "승인 공문 번호 또는 회신 메일 제목/일자",
+  "scope": "term.kma.org 검색목록 전체 / 제6판 용어 한정 등 승인받은 범위",
+  "purpose": "승인받은 활용 목적(예: 기관 내부 용어 표준화)",
+  "redistribution": "재배포 허용 여부와 조건",
+  "attribution": "지정된 출처 표기 문구",
+  "expires_on": "YYYY-MM-DD 또는 생략",
+  "bulk_collection_allowed": false
+}
