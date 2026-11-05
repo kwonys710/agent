@@ -15,6 +15,7 @@ def validate(conn, start_page=1):
     res = []
     add = lambda check, status, detail: res.append({"check": check, "status": status, "detail": detail})  # noqa: E731
     mode = _meta(conn, "mode")
+    partial = mode in ("sample", "import")  # 일부 페이지만 다루는 모드
 
     ok_pages = [r[0] for r in conn.execute("SELECT page_number FROM pages WHERE status='ok' ORDER BY 1")]
     expected = list(range(start_page, start_page + len(ok_pages)))
@@ -52,13 +53,13 @@ def validate(conn, start_page=1):
     if last is not None:
         add("마지막 페이지 도달", "PASS", f"page {last} ({_meta(conn, 'stop_reason')})")
     else:
-        add("마지막 페이지 도달", "WARN" if mode == "sample" else "FAIL",
-            "샘플 모드 — 전체 페이지 미순회(정상)" if mode == "sample" else "마지막 페이지 미도달")
+        add("마지막 페이지 도달", "WARN" if partial else "FAIL",
+            f"{mode} 모드 — 전체 페이지 미순회(정상)" if partial else "마지막 페이지 미도달")
 
     total = _meta(conn, "site_total_count")
     if total is None:
         add("사이트 건수 대비 수집 건수", "BLOCKED", "사이트 전체 건수 미확인(total_count_regex 미설정 또는 문구 없음)")
-    elif mode == "sample":
+    elif partial:
         add("사이트 건수 대비 수집 건수", "WARN", f"사이트 {total} / 샘플 추출 {raw}(샘플이므로 비교 대상 아님)")
     else:
         add("사이트 건수 대비 수집 건수", "PASS" if raw == total else "FAIL",

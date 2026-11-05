@@ -3,3 +3,9 @@ data/processed/*.sqlite
 logs/*.log
 permission.json
 __pycache__/
+# Real KMA data (copyright: no redistribution without approval) — kept local only
+samples/
+tests/fixtures/
+data/output/*.csv
+data/output/*.xlsx
+reports/validation_report.json

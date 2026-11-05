@@ -36,9 +36,11 @@ def synthetic_html(page):
 
 def make_cfg(tmp):
     cfg = kc.load_config()
-    cfg["pagination"].update(method="GET", page_param="page", page_size=3)
-    cfg["parser"].update(row_selector="table.res tbody tr", total_count_regex=r"총\s*([\d,]+)\s*건",
-                         term_id_query_param="tid")
+    # 합성 표(table) 구조용 설정. 실제 사이트 값(settings.yaml: layout=dl 등)과 분리한다.
+    cfg["pagination"].update(method="GET", page_param="page", page_size=3, fixed_params={})
+    cfg["parser"].update(layout="table", row_selector="table.res tbody tr",
+                         total_count_regex=r"총\s*([\d,]+)\s*건", term_id_query_param="tid",
+                         variant_separator=None, edition_label="미확인")
     cfg["parser"]["header_map"].update(english_term="^영문$", korean_term="^한글$")
     for k in ("raw_dir", "output_dir", "report_dir", "log_dir"):
         cfg["paths"][k] = str(Path(tmp) / k)  # 절대경로 → ROOT 대신 임시폴더 사용
@@ -151,8 +153,11 @@ class PipelineTest(unittest.TestCase):
             kc.load_permission(p)
 
     def test_unconfigured_site_refuses_to_run(self):
+        cfg = kc.load_config()
+        cfg["pagination"]["method"] = None  # 관찰 전 상태(null)
         with self.assertRaises(SystemExit):
-            kc.require_site_config(kc.load_config())
+            kc.require_site_config(cfg)
+        kc.require_site_config(kc.load_config())  # 실제 관찰값으로 채운 현재 설정은 통과
 
 
 if __name__ == "__main__":

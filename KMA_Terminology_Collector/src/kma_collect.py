@@ -4,6 +4,7 @@
   python src/kma_collect.py --mode sample --max-pages 3
   python src/kma_collect.py --mode full   --authorization-file permission.json
   python src/kma_collect.py --mode resume --authorization-file permission.json
+  python src/kma_collect.py --mode import --html-dir samples/a_substring   # 브라우저 저장본 변환
   python src/kma_collect.py --mode export
 """
 import argparse
@@ -41,11 +42,13 @@ def load_config(path=ROOT / "config" / "settings.yaml"):
 
 
 def require_site_config(cfg):
-    missing = [k for k, v in [("pagination.method", cfg["pagination"]["method"]),
-                              ("pagination.page_param", cfg["pagination"]["page_param"]),
-                              ("parser.row_selector", cfg["parser"]["row_selector"]),
-                              ("parser.header_map.english_term", cfg["parser"]["header_map"]["english_term"]),
-                              ("parser.header_map.korean_term", cfg["parser"]["header_map"]["korean_term"])] if not v]
+    checks = [("pagination.method", cfg["pagination"]["method"]),
+              ("pagination.page_param", cfg["pagination"]["page_param"]),
+              ("parser.row_selector", cfg["parser"]["row_selector"])]
+    if cfg["parser"].get("layout", "table") == "table":
+        checks += [("parser.header_map.english_term", cfg["parser"]["header_map"]["english_term"]),
+                   ("parser.header_map.korean_term", cfg["parser"]["header_map"]["korean_term"])]
+    missing = [k for k, v in checks if not v]
     if missing:
         raise SystemExit("settings.yaml 미확정 항목: " + ", ".join(missing)
                          + "\n→ --mode inspect 결과(reports/inspect_report.json)로 실제 값을 확인해 채우세요.")
@@ -148,6 +151,26 @@ def make_fetcher(cfg):
     return fetch
 
 
+def make_file_fetcher(cfg, html_dir):
+    """브라우저에서 사람이 직접 열람·저장한 p<N>.html 을 읽는다(사이트에 요청하지 않음)."""
+    from urllib.parse import urlencode
+
+    pg = cfg["pagination"]
+    base = cfg["site"]["base_url"].rstrip("/") + cfg["site"]["list_path"]
+
+    def fetch(page):
+        url = f"{base}?{urlencode(dict(pg.get('fixed_params') or {}, **{pg['page_param']: page}))}"
+        raw = (Path(html_dir) / f"p{page}.html").read_bytes()  # 없으면 실패 페이지로 기록됨
+        for enc in ("utf-8", "cp949"):  # 사이트는 UTF-8. 레거시 저장본(EUC-KR/CP949) 대비
+            try:
+                return raw.decode(enc), url
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", errors="replace"), url  # 깨짐은 validator 가 FAIL 로 잡음
+
+    return fetch
+
+
 def check_robots(cfg):
     import requests
 
@@ -212,6 +235,15 @@ def collect(cfg, conn, fetch, max_pages=None, sleep=time.sleep):
             log.error("page %s 파싱 실패: %s", page, e)
             return
         if total is not None:
+            prev_total = get_meta(conn, "site_total_count")
+            if prev_total is not None and prev_total != total:
+                # term.kma.org 의 페이지 링크는 spelling_chk 를 빠뜨려 검색 조건이 바뀐다(4,233→38,793).
+                conn.execute("INSERT OR REPLACE INTO pages VALUES(?,?,?,?,?,?,?,?,?)",
+                             (page, "failed", len(rows), 0, None, url, str(raw_file), ts,
+                              f"검색 결과 총건수 변경 {prev_total}→{total}: 검색 조건이 유지되지 않음"))
+                conn.commit()
+                log.error("page %s: 총건수 %s→%s — 검색 조건 변경 감지, 중단", page, prev_total, total)
+                return
             set_meta(conn, "site_total_count", total)
         h = hashlib.sha256("\n".join(r["term_id"] for r in rows).encode()).hexdigest()
 
@@ -271,12 +303,13 @@ def collect(cfg, conn, fetch, max_pages=None, sleep=time.sleep):
 
 def state_path(cfg, mode):
     base = ROOT / cfg["paths"]["state_db"]
-    return base.with_name(base.stem + "_sample.sqlite") if mode == "sample" else base
+    return base.with_name(f"{base.stem}_{mode}.sqlite") if mode in ("sample", "import") else base
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", required=True, choices=["inspect", "sample", "full", "resume", "export"])
+    ap.add_argument("--mode", required=True, choices=["inspect", "sample", "full", "resume", "import", "export"])
+    ap.add_argument("--html-dir", help="import 모드: 브라우저에서 저장한 p1.html, p2.html … 폴더")
     ap.add_argument("--max-pages", type=int, default=SAMPLE_MAX_PAGES)
     ap.add_argument("--authorization-file")
     ap.add_argument("--config", default=str(ROOT / "config" / "settings.yaml"))
@@ -298,13 +331,27 @@ def main(argv=None):
 
     if a.mode == "export":
         from exporter import export
-        db = state_path(cfg, "full")
-        if not db.exists():
-            db = state_path(cfg, "sample")
-        if not db.exists():
+        db = next((d for d in (state_path(cfg, m) for m in ("full", "import", "sample")) if d.exists()), None)
+        if db is None:
             raise SystemExit("수집 상태 DB가 없습니다. sample 또는 full 을 먼저 실행하세요.")
         out = export(open_state(db), cfg, ROOT, source=db.name)
         print(json.dumps(out, ensure_ascii=False, indent=1))
+        return 0
+
+    if a.mode == "import":  # 오프라인: 사이트 요청·robots 확인 없음
+        if not a.html_dir or not list(Path(a.html_dir).glob("p*.html")):
+            raise SystemExit("--html-dir 에 p1.html, p2.html … 파일이 필요합니다.")
+        require_site_config(cfg)
+        db = state_path(cfg, "import")
+        db.unlink(missing_ok=True)
+        conn = open_state(db)
+        set_meta(conn, "mode", "import")
+        set_meta(conn, "html_dir", str(Path(a.html_dir).resolve()))
+        set_meta(conn, "source_list_url", cfg["site"]["base_url"] + cfg["site"]["list_path"])
+        set_meta(conn, "config_snapshot", {k: cfg[k] for k in ("pagination", "parser", "throttle")})
+        conn.commit()
+        n = len(list(Path(a.html_dir).glob("p*.html")))
+        collect(cfg, conn, make_file_fetcher(cfg, a.html_dir), max_pages=n, sleep=lambda _: None)
         return 0
 
     if a.mode == "sample":

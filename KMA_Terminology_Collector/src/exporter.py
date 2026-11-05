@@ -46,7 +46,11 @@ def export(conn, cfg, root, source="state.sqlite"):
     header, terms = _rows(conn, f"SELECT {', '.join(present)} FROM terms "
                                 f"ORDER BY english_term COLLATE NOCASE, korean_term")
 
-    csv_path = out_dir / "KMA_의학용어집_6판.csv"
+    mode = json.loads((conn.execute("SELECT value FROM meta WHERE key='mode'").fetchone() or ['""'])[0])
+    stem = f"KMA_의학용어집_{cfg['parser']['edition_label']}"
+    if mode in ("sample", "import"):
+        stem += f"_REAL_SAMPLE_{mode}"  # 전체 데이터가 아님을 파일명에 표시
+    csv_path = out_dir / f"{stem}.csv"
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
         w.writerow(header)
@@ -78,7 +82,7 @@ def export(conn, cfg, root, source="state.sqlite"):
                  ["설정 스냅샷", meta.get("config_snapshot")]]
     meta_rows += [[f"검증: {c['check']}", f"{c['status']} — {c['detail']}"] for c in checks]
     _sheet(wb, "수집메타데이터", ["항목", "값"], meta_rows)
-    xlsx_path = out_dir / "KMA_의학용어집_6판.xlsx"
+    xlsx_path = out_dir / f"{stem}.xlsx"
     wb.save(xlsx_path)
 
     report = {"exported_at": exported_at, "state_db": source, "rows": len(terms), "checks": checks}
